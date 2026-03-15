@@ -4,7 +4,20 @@
 
 ARISE is a framework-agnostic middleware that sits between your LLM agent and its tool library. When your agent encounters tasks it can't solve with its current tools, ARISE detects the gap, synthesizes a new tool, tests it in a sandbox, and promotes it to the active library — no human intervention required.
 
-It works with any agent framework: [Strands](https://github.com/strands-agents/sdk-python), LangGraph, CrewAI, raw OpenAI/Anthropic function calling, or your own setup. ARISE doesn't replace your agent — it gives it the ability to extend itself.
+ARISE doesn't replace your agent — it gives it the ability to extend itself.
+
+### Framework Compatibility
+
+| Framework | Status | Integration |
+|-----------|--------|-------------|
+| **Custom `agent_fn`** | Supported | Any `(task, tools) -> str` function works out of the box |
+| **[Strands Agents](https://github.com/strands-agents/sdk-python)** | Supported | First-class adapter — pass `Agent` directly via `ARISE(agent=...)` |
+| **Raw OpenAI / Anthropic** | Supported | Wrap your API calls in an `agent_fn` — see [examples/api_agent.py](./examples/api_agent.py) |
+| **LangGraph** | Planned | Adapter coming in v0.2 |
+| **CrewAI** | Planned | Adapter coming in v0.2 |
+| **AutoGen** | Planned | Under consideration |
+
+Any framework that can accept a list of callable tools works today via `agent_fn`. First-class adapters (like Strands) add convenience — automatic tool injection, native tool format conversion, etc.
 
 ## The Problem
 

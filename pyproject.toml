@@ -9,9 +9,28 @@ description = "Self-evolving agent framework — agents that create their own to
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+authors = [
+    { name = "Alibek Kenzhegaliyev" },
+]
+keywords = ["agents", "tools", "self-evolving", "llm", "autonomous", "skill-library"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "pydantic>=2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/abekek/arise"
+Repository = "https://github.com/abekek/arise"
+Issues = "https://github.com/abekek/arise/issues"
 
 [project.optional-dependencies]
 litellm = ["litellm>=1.0"]

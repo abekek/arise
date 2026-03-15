@@ -1,11 +1,43 @@
+# Python
 *.pyc
 __pycache__/
 *.egg-info/
+*.egg
 dist/
 build/
 .eggs/
+
+# ARISE local stores
 arise_skills*/
 arise_trajectories*/
 *.db
 *.db-wal
 *.db-shm
+
+# Environment
+.env
+.env.*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Testing / coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Misc
+*.log
