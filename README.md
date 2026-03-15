@@ -25,49 +25,20 @@ ARISE automates the tool engineering feedback loop for these cases.
 ## How It Works
 
 ```mermaid
-flowchart TB
-    subgraph agent["🤖 Your Agent (Strands · LangGraph · CrewAI · any framework)"]
-        direction LR
-        task([Task]) --> tools[[Tools]] --> result([Result])
-    end
-
-    agent -->|trajectory| arise
-
-    subgraph arise["⚡ ARISE Layer"]
-        direction TB
-        log["Log trajectory\n(task, tools used, outcome)"]
-        reward["Compute reward signal"]
-        check{Failures\naccumulate?}
-
-        log --> reward --> check
-
-        check -->|No| done["Agent continues\nwith current tools"]
-        check -->|Yes| evolve
-
-        subgraph evolve["Evolution Cycle"]
-            direction TB
-            gap["🔍 Analyze gaps\n&quot;What tool is missing?&quot;"]
-            synth["🛠️ Synthesize candidate tool"]
-            test["🧪 Test in sandbox"]
-            adversarial["⚔️ Adversarial validation"]
-            gate{Tests\npass?}
-
-            gap --> synth --> test --> adversarial --> gate
-            gate -->|Yes| promote["✅ Promote to library"]
-            gate -->|No| reject["❌ Reject & refine"]
-            reject -.->|retry| synth
-        end
-    end
-
-    promote -->|"new tools available"| agent
-
-    style agent fill:#1a1a2e,stroke:#e94560,stroke-width:2px,color:#fff
-    style arise fill:#16213e,stroke:#0f3460,stroke-width:2px,color:#fff
-    style evolve fill:#0f3460,stroke:#533483,stroke-width:2px,color:#fff
-    style promote fill:#1b5e20,stroke:#4caf50,stroke-width:1px,color:#fff
-    style reject fill:#b71c1c,stroke:#ef5350,stroke-width:1px,color:#fff
-    style check fill:#e65100,stroke:#ff9800,stroke-width:1px,color:#fff
-    style gate fill:#e65100,stroke:#ff9800,stroke-width:1px,color:#fff
+flowchart TD
+    A["Your Agent — Strands, LangGraph, CrewAI, etc.
+    Task → Tools → Result"] --> B["ARISE logs trajectory + computes reward"]
+    B --> C{Failures accumulate?}
+    C -- No --> D[Agent continues with current tools]
+    C -- Yes --> E["Analyze gaps — what tool is missing?"]
+    E --> F[Synthesize candidate tool via LLM]
+    F --> G[Run tests in sandbox]
+    G --> H[Adversarial validation]
+    H --> I{Pass?}
+    I -- Yes --> J[Promote to active library]
+    I -- No --> K[Refine and retry]
+    K --> F
+    J --> A
 ```
 
 ## When to Use ARISE
