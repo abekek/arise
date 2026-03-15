@@ -25,8 +25,8 @@ QUEUE_URL = os.environ.get("ARISE_TEST_QUEUE_URL", "")
 AWS_PROFILE = os.environ.get("AWS_PROFILE")
 
 if not BUCKET or not QUEUE_URL:
-    print("Set ARISE_TEST_BUCKET and ARISE_TEST_QUEUE_URL env vars.")
-    sys.exit(1)
+    import pytest
+    pytest.skip("ARISE_TEST_BUCKET and ARISE_TEST_QUEUE_URL not set", allow_module_level=True)
 
 session = boto3.Session(profile_name=AWS_PROFILE, region_name=REGION)
 s3 = session.client("s3")
