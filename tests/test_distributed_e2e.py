@@ -1,7 +1,7 @@
 """End-to-end test of distributed mode against real AWS (S3 + SQS).
 
 Usage:
-    AWS_PROFILE=apartment-ai python tests/test_distributed_e2e.py
+    ARISE_TEST_BUCKET=my-bucket ARISE_TEST_QUEUE_URL=https://sqs... python tests/test_distributed_e2e.py
 """
 
 import json
@@ -19,12 +19,17 @@ from arise.stores.sqs import SQSTrajectoryReporter, deserialize_trajectory
 from arise.types import Skill, SkillOrigin, SkillStatus, Trajectory
 from arise.worker import ARISEWorker
 
-REGION = "us-west-2"
-BUCKET = "arise-test-436776987862"
-PREFIX = "e2e-test"
-QUEUE_URL = "https://us-west-2.queue.amazonaws.com/436776987862/arise-trajectories-test"
+REGION = os.environ.get("ARISE_TEST_REGION", "us-west-2")
+BUCKET = os.environ.get("ARISE_TEST_BUCKET", "")
+PREFIX = os.environ.get("ARISE_TEST_PREFIX", "e2e-test")
+QUEUE_URL = os.environ.get("ARISE_TEST_QUEUE_URL", "")
+AWS_PROFILE = os.environ.get("AWS_PROFILE")
 
-session = boto3.Session(profile_name="apartment-ai", region_name=REGION)
+if not BUCKET or not QUEUE_URL:
+    print("Set ARISE_TEST_BUCKET and ARISE_TEST_QUEUE_URL env vars.")
+    sys.exit(1)
+
+session = boto3.Session(profile_name=AWS_PROFILE, region_name=REGION)
 s3 = session.client("s3")
 sqs = session.client("sqs")
 
