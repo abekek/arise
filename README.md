@@ -219,6 +219,87 @@ config = ARISEConfig(
 )
 ```
 
+## Reward Functions
+
+The `reward_fn` tells ARISE whether the agent succeeded. It takes a `Trajectory` and returns a float between 0.0 (failure) and 1.0 (success). Trajectories with reward < 0.5 count as failures and contribute toward triggering evolution.
+
+### Built-in rewards
+
+```python
+from arise.rewards import task_success, code_execution_reward, answer_match_reward, efficiency_reward, llm_judge_reward
+```
+
+| Function | How it scores | Best for |
+|----------|--------------|----------|
+| `task_success` | 1.0 if `metadata["success"]` is truthy or outcome has no "error"; else 0.0 | General-purpose agents where you set `success` in metadata |
+| `code_execution_reward` | 1.0 if no step errors; -0.25 per error (min 0.0) | Coding/tool-use agents |
+| `answer_match_reward` | 1.0 exact match, 0.7 substring match, 0.0 miss — against `metadata["expected_output"]` | Q&A, data extraction |
+| `efficiency_reward` | 1.0 minus 0.1 per extra step (min 0.0) | Penalizing verbose trajectories |
+| `llm_judge_reward` | LLM rates trajectory 0.0–1.0 (costs ~$0.001/call) | Open-ended tasks with no ground truth |
+
+### Using built-in rewards
+
+The simplest option — pass metadata to `run()` to drive the reward:
+
+```python
+from arise.rewards import task_success
+
+agent = ARISE(agent_fn=my_agent, reward_fn=task_success)
+
+# Option 1: Set success explicitly
+result = agent.run("Summarize the report", success=True)
+
+# Option 2: Let task_success check the outcome for errors automatically
+result = agent.run("Summarize the report")
+```
+
+For answer matching:
+
+```python
+from arise.rewards import answer_match_reward
+
+agent = ARISE(agent_fn=my_agent, reward_fn=answer_match_reward)
+result = agent.run("What is 2+2?", expected_output="4")
+```
+
+### Writing a custom reward
+
+Any `Callable[[Trajectory], float]` works. The trajectory gives you the task, steps, outcome, and any metadata you passed to `run()`:
+
+```python
+from arise.types import Trajectory
+
+def my_reward(trajectory: Trajectory) -> float:
+    # trajectory.task — the original task string
+    # trajectory.outcome — the agent's final output
+    # trajectory.steps — list of Step(action, result, error, latency_ms, ...)
+    # trajectory.metadata — kwargs passed to agent.run()
+
+    # Example: binary success from an external validator
+    expected = trajectory.metadata.get("expected")
+    if expected and expected in trajectory.outcome:
+        return 1.0
+    return 0.0
+```
+
+### Combining rewards
+
+Use `CompositeReward` to blend multiple signals with weights:
+
+```python
+from arise.rewards import task_success, efficiency_reward, llm_judge_reward, CompositeReward
+
+reward_fn = CompositeReward([
+    (task_success, 0.5),       # 50% — did it work?
+    (efficiency_reward, 0.2),  # 20% — was it concise?
+    (lambda t: llm_judge_reward(t, model="gpt-4o-mini"), 0.3),  # 30% — qualitative
+])
+
+agent = ARISE(agent_fn=my_agent, reward_fn=reward_fn)
+```
+
+Weights are normalized automatically — `(0.5, 0.2, 0.3)` and `(5, 2, 3)` produce the same result.
+
 ## API Costs
 
 Tool synthesis uses a cheap model (gpt-4o-mini by default). Each evolution cycle is 3-5 LLM calls:
