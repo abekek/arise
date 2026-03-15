@@ -1,0 +1,11 @@
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+.eggs/
+arise_skills*/
+arise_trajectories*/
+*.db
+*.db-wal
+*.db-shm

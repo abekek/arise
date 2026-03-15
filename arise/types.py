@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Callable
+from datetime import datetime
+import uuid
+
+
+class SkillStatus(Enum):
+    TESTING = "testing"
+    ACTIVE = "active"
+    DEPRECATED = "deprecated"
+
+
+class SkillOrigin(Enum):
+    MANUAL = "manual"
+    SYNTHESIZED = "synthesized"
+    REFINED = "refined"
+    COMPOSED = "composed"
+
+
+@dataclass
+class Skill:
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    name: str = ""
+    description: str = ""
+    implementation: str = ""
+    test_suite: str = ""
+    version: int = 1
+    status: SkillStatus = SkillStatus.TESTING
+    origin: SkillOrigin = SkillOrigin.SYNTHESIZED
+    parent_id: str | None = None
+    created_at: datetime = field(default_factory=datetime.now)
+
+    # Performance tracking
+    invocation_count: int = 0
+    success_count: int = 0
+    avg_latency_ms: float = 0.0
+    error_log: list[str] = field(default_factory=list)
+
+    @property
+    def success_rate(self) -> float:
+        if self.invocation_count == 0:
+            return 0.0
+        return self.success_count / self.invocation_count
+
+    def to_callable(self) -> Callable:
+        namespace: dict[str, Any] = {}
+        exec(self.implementation, namespace)  # noqa: S102
+        return namespace[self.name]
+
+    def to_tool_spec(self) -> ToolSpec:
+        fn = self.to_callable()
+        parameters = _extract_parameters(fn)
+        return ToolSpec(
+            name=self.name,
+            description=self.description,
+            parameters=parameters,
+            fn=fn,
+            skill_id=self.id,
+        )
+
+
+@dataclass
+class ToolSpec:
+    name: str
+    description: str
+    parameters: dict[str, Any]  # JSON Schema for parameters
+    fn: Callable
+    skill_id: str | None = None
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self.fn(*args, **kwargs)
+
+
+def _extract_parameters(fn: Callable) -> dict[str, Any]:
+    import inspect
+    sig = inspect.signature(fn)
+    hints = {}
+    try:
+        hints = fn.__annotations__ if hasattr(fn, "__annotations__") else {}
+    except Exception:
+        pass
+
+    type_map = {
+        str: "string", int: "integer", float: "number", bool: "boolean",
+        list: "array", dict: "object",
+    }
+
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, param in sig.parameters.items():
+        prop: dict[str, Any] = {}
+        hint = hints.get(name)
+        if hint in type_map:
+            prop["type"] = type_map[hint]
+        else:
+            prop["type"] = "string"
+        if param.default is inspect.Parameter.empty:
+            required.append(name)
+        else:
+            prop["default"] = param.default
+        properties[name] = prop
+
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+    }
+
+
+@dataclass
+class Step:
+    observation: str
+    reasoning: str
+    action: str
+    action_input: dict[str, Any] = field(default_factory=dict)
+    result: str = ""
+    error: str | None = None
+    latency_ms: float = 0.0
+
+
+@dataclass
+class Trajectory:
+    task: str
+    steps: list[Step] = field(default_factory=list)
+    outcome: str = ""
+    reward: float = 0.0
+    skill_library_version: int = 0
+    timestamp: datetime = field(default_factory=datetime.now)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class GapAnalysis:
+    description: str
+    evidence: list[str] = field(default_factory=list)
+    suggested_name: str = ""
+    suggested_signature: str = ""
+    similar_existing: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TestResult:
+    passed: bool
+    test_name: str
+    error: str | None = None
+    stdout: str = ""
+    execution_time_ms: float = 0.0
+
+
+@dataclass
+class SandboxResult:
+    success: bool
+    test_results: list[TestResult] = field(default_factory=list)
+    total_passed: int = 0
+    total_failed: int = 0
+    stdout: str = ""
+    stderr: str = ""

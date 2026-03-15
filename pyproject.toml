@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "arise-ai"
+version = "0.1.0"
+description = "Self-evolving agent framework — agents that create their own tools"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+litellm = ["litellm>=1.0"]
+docker = ["docker>=7.0"]
+all = ["litellm>=1.0", "docker>=7.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["arise"]
+
+[project.scripts]
+arise = "arise.cli:main"
