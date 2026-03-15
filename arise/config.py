@@ -31,5 +31,12 @@ class ARISEConfig:
     # Allowed imports in generated skills
     allowed_imports: list[str] | None = None  # None = no restriction
 
+    # Distributed / remote store settings
+    s3_bucket: str | None = None
+    s3_prefix: str = "arise"
+    sqs_queue_url: str | None = None
+    aws_region: str = "us-east-1"
+    skill_cache_ttl_seconds: int = 30
+
     # Logging
     verbose: bool = True

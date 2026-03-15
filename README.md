@@ -116,32 +116,40 @@ After 8 episodes, the agent autonomously created: `parse_json_response`, `fetch_
 
 ## Strands Integration
 
-```python
-from arise import ARISE
-from arise.adapters import strands_adapter
-from arise.rewards import task_success
-from strands.models import BedrockModel
+Pass your Strands `Agent` directly — ARISE auto-detects it and injects evolving tools alongside your existing `@tool` functions:
 
-# Wrap your Strands agent — ARISE injects evolving tools alongside your existing ones
-agent_fn = strands_adapter(
+```python
+from strands import Agent, tool
+from strands.models import BedrockModel
+from arise import ARISE
+from arise.rewards import task_success
+
+@tool
+def search_logs(query: str) -> str:
+    """Search application logs for a pattern."""
+    ...
+
+agent = Agent(
     model=BedrockModel(model_id="us.anthropic.claude-sonnet-4-20250514"),
+    tools=[search_logs],
     system_prompt="You are a DevOps assistant.",
 )
 
 arise = ARISE(
-    agent_fn=agent_fn,
+    agent=agent,            # Pass the Strands Agent directly
     reward_fn=task_success,
-    model="gpt-4o-mini",  # cheap model for synthesis, your agent uses Claude
+    model="gpt-4o-mini",    # cheap model for synthesis, your agent uses Claude
 )
 ```
 
-ARISE uses a cheap model (gpt-4o-mini) for tool synthesis. Your agent's model is independent — use Claude, GPT-4, Gemini, whatever you want.
+Your `@tool` functions are preserved. When ARISE evolves new tools, they're added alongside your existing ones. ARISE uses a cheap model (gpt-4o-mini) for tool synthesis — your agent's model is independent.
 
 ## Architecture
 
 ```
 arise/
 ├── agent.py              # ARISE wrapper — the main class
+├── worker.py             # Background evolution worker (SQS consumer)
 ├── types.py              # Skill, ToolSpec, Trajectory, GapAnalysis
 ├── config.py             # ARISEConfig
 ├── llm.py                # LLM abstraction (litellm or raw HTTP)
@@ -150,6 +158,11 @@ arise/
 │   ├── forge.py          # Skill synthesis, refinement, adversarial testing
 │   ├── sandbox.py        # Isolated execution (subprocess or Docker)
 │   └── triggers.py       # When to enter evolution mode
+├── stores/
+│   ├── base.py           # Abstract interfaces (SkillStore, TrajectoryReporter)
+│   ├── local.py          # Local wrappers around SQLite stores
+│   ├── s3.py             # S3-backed skill store (read-only + writer)
+│   └── sqs.py            # SQS trajectory reporter (fire-and-forget)
 ├── trajectory/
 │   ├── store.py          # Persistent trajectory logging (SQLite)
 │   └── logger.py         # Per-episode trajectory recorder
@@ -228,6 +241,107 @@ Tool synthesis uses a cheap model (gpt-4o-mini by default). Each evolution cycle
 | [`file_gen_agent.py`](./examples/file_gen_agent.py) | File generation with non-binary rewards (LLM judge + structural validation) |
 | [`retrieval_agent.py`](./examples/retrieval_agent.py) | Text agent evolves extraction, summarization tools |
 
+## Distributed Mode
+
+By default, ARISE runs everything in-process with local SQLite. For stateless deployments (Lambda, multi-replica, AgentCore), you can decouple into a **stateless agent** that reads skills from S3 and reports trajectories to SQS, and a **background worker** that consumes trajectories and runs evolution.
+
+```mermaid
+flowchart LR
+    subgraph Agent["Agent Process (stateless)"]
+        A1[Serve customers]
+        A2[Read active skills]
+        A3[Report trajectories]
+    end
+
+    subgraph Worker["ARISE Worker (background)"]
+        W1[Consume trajectories]
+        W2[Detect gaps & evolve]
+        W3[Write new skills]
+    end
+
+    S3[(S3\nSkill Store)]
+    SQS[[SQS\nTrajectory Queue]]
+
+    A2 -- get_tool_specs --> S3
+    S3 -- evolved skills --> A2
+    A3 -- fire & forget --> SQS
+    SQS -- poll --> W1
+    W1 --> W2
+    W2 --> W3
+    W3 -- promote --> S3
+```
+
+### Agent side (stateless)
+
+```python
+from arise import create_distributed_arise, ARISEConfig
+from arise.rewards import task_success
+
+config = ARISEConfig(
+    s3_bucket="my-arise-bucket",
+    s3_prefix="prod/skills",
+    sqs_queue_url="https://sqs.us-east-1.amazonaws.com/123456789/arise-trajectories",
+    aws_region="us-east-1",
+    skill_cache_ttl_seconds=30,  # how often to check S3 for new skills
+)
+
+agent = create_distributed_arise(
+    agent_fn=my_agent,
+    reward_fn=task_success,
+    config=config,
+)
+
+# Agent reads skills from S3, reports trajectories to SQS
+# No local SQLite, no in-process evolution
+result = agent.run("Handle this customer request")
+```
+
+Or wire it up manually:
+
+```python
+from arise import ARISE
+from arise.stores.s3 import S3SkillStore
+from arise.stores.sqs import SQSTrajectoryReporter
+
+agent = ARISE(
+    agent_fn=my_agent,
+    reward_fn=task_success,
+    skill_store=S3SkillStore(bucket="my-bucket", prefix="skills"),
+    trajectory_reporter=SQSTrajectoryReporter(queue_url="https://sqs..."),
+)
+```
+
+### Worker side (background)
+
+```python
+from arise.config import ARISEConfig
+from arise.worker import ARISEWorker
+
+config = ARISEConfig(
+    model="gpt-4o-mini",
+    s3_bucket="my-arise-bucket",
+    s3_prefix="prod/skills",
+    sqs_queue_url="https://sqs.us-east-1.amazonaws.com/123456789/arise-trajectories",
+    failure_threshold=5,
+)
+
+worker = ARISEWorker(config=config)
+
+# Long-running (ECS/EC2):
+worker.run_forever(poll_interval=5)
+
+# Or single invocation (Lambda):
+worker.run_once()
+```
+
+The worker polls SQS for trajectories, buffers them, and triggers evolution when the failure threshold is met. New skills are written to S3, where agent processes pick them up on their next cache refresh.
+
+### Install with AWS support
+
+```bash
+pip install arise-ai[aws]   # adds boto3
+```
+
 ## Dependencies
 
 Core framework has **one dependency** (`pydantic`). Everything else is optional:
@@ -236,6 +350,7 @@ Core framework has **one dependency** (`pydantic`). Everything else is optional:
 pip install arise-ai                # just pydantic
 pip install arise-ai[litellm]       # + litellm for multi-provider LLM support
 pip install arise-ai[docker]        # + docker for container sandbox
+pip install arise-ai[aws]           # + boto3 for distributed mode (S3 + SQS)
 pip install arise-ai[all]           # everything
 ```
 
