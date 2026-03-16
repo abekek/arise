@@ -1,5 +1,9 @@
 # ARISE — Adaptive Runtime Improvement through Self-Evolution
 
+[![PyPI version](https://img.shields.io/pypi/v/arise-ai.svg)](https://pypi.org/project/arise-ai/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/arise-ai/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **Your agent works great on the tasks you planned for. ARISE handles the ones you didn't.**
 
 ARISE is a framework-agnostic middleware that sits between your LLM agent and its tool library. When your agent encounters tasks it can't solve with its current tools, ARISE detects the gap, synthesizes a new tool, tests it in a sandbox, and promotes it to the active library — no human intervention required.
