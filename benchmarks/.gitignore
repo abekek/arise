@@ -1,0 +1,4 @@
+results/*.json
+figures/
+__pycache__/
+*.pyc
