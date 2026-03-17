@@ -3,6 +3,7 @@ from arise.config import ARISEConfig
 from arise.skills.library import SkillLibrary
 from arise.skills.sandbox import Sandbox
 from arise.skills.forge import SkillForge
+from arise.skills.ab_test import SkillABTest
 from arise.stores.base import SkillStore, SkillStoreWriter, TrajectoryReporter
 from arise.types import Skill, SkillStatus, SkillOrigin, ToolSpec, Trajectory, Step, GapAnalysis
 from arise.registry import SkillRegistry
@@ -14,6 +15,7 @@ __all__ = [
     "SkillLibrary",
     "Sandbox",
     "SkillForge",
+    "SkillABTest",
     "SkillStore",
     "SkillStoreWriter",
     "TrajectoryReporter",

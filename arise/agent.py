@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable
 
 from arise.config import ARISEConfig
+from arise.skills.ab_test import SkillABTest
 from arise.skills.forge import SkillForge
 from arise.skills.library import SkillLibrary
 from arise.skills.sandbox import Sandbox
@@ -120,6 +121,7 @@ class ARISE:
         self._episode_count = 0
         self._evolution_timestamps: list[float] = []
         self._last_evolution_episode = 0
+        self._ab_tests: dict[str, SkillABTest] = {}
 
     def run(self, task: str, **kwargs: Any) -> str:
         """Run a single task through the agent with the current tool library.
@@ -129,6 +131,16 @@ class ARISE:
         """
         self._episode_count += 1
         tool_specs = self._skill_store.get_tool_specs()
+
+        # Replace tool specs involved in A/B tests with selected variant
+        ab_variants: dict[str, Skill] = {}  # skill_name -> selected Skill for this episode
+        for name, ab in self._ab_tests.items():
+            variant = ab.get_variant()
+            ab_variants[name] = variant
+            tool_specs = [
+                variant.to_tool_spec() if ts.name == name else ts
+                for ts in tool_specs
+            ]
 
         # Build trajectory in-memory
         trajectory = Trajectory(
@@ -172,6 +184,20 @@ class ARISE:
         if reward != reward:  # NaN check
             raise ValueError("reward_fn returned NaN")
         trajectory.reward = max(0.0, min(1.0, reward))
+
+        # Record A/B test outcomes and check for concluded tests
+        for name, ab in list(self._ab_tests.items()):
+            if name in ab_variants:
+                ab.record(ab_variants[name], success=(trajectory.reward >= 0.5))
+            if ab.status == "concluded" and self.skill_library is not None:
+                winner = ab.winner
+                loser = ab.loser
+                if winner and loser:
+                    self.skill_library.promote(winner.id)
+                    self.skill_library.deprecate(loser.id, reason="Lost A/B test")
+                    if self.config.verbose:
+                        print(f"[ARISE] A/B test concluded: '{winner.name}' won over variant")
+                del self._ab_tests[name]
 
         # Report trajectory (fire-and-forget)
         if self._trajectory_reporter is not None:
@@ -320,6 +346,12 @@ class ARISE:
                 self.skill_library.deprecate(skill.id, reason="Manually removed")
                 return
         raise ValueError(f"No active skill named '{name}'")
+
+    def start_ab_test(self, skill_a: Skill, skill_b: Skill, min_episodes: int = 20) -> SkillABTest:
+        """Start an A/B test between two skill versions."""
+        ab = SkillABTest(skill_a=skill_a, skill_b=skill_b, min_episodes=min_episodes)
+        self._ab_tests[skill_a.name] = ab
+        return ab
 
     @property
     def skills(self) -> list[Skill]:
