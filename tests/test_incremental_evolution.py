@@ -237,14 +237,18 @@ def test_patch_caps_failures_at_five():
 def test_evolve_patches_existing_skill_instead_of_synthesis():
     """When a gap's suggested_name matches an active skill, evolve() should
     call forge.patch() rather than forge.synthesize()."""
+    import tempfile
     from arise.agent import ARISE
+    from arise.config import ARISEConfig
     from arise.types import GapAnalysis, SandboxResult, SkillStatus
 
-    # Build a minimal ARISE instance in local mode
+    # Build a minimal ARISE instance in local mode with isolated paths
     agent_fn = MagicMock(return_value="ok")
     reward_fn = MagicMock(return_value=0.0)
 
-    arise = ARISE(agent_fn=agent_fn, reward_fn=reward_fn)
+    tmpdir = tempfile.mkdtemp()
+    config = ARISEConfig(skill_store_path=f"{tmpdir}/skills", trajectory_store_path=f"{tmpdir}/traj")
+    arise = ARISE(agent_fn=agent_fn, reward_fn=reward_fn, config=config)
 
     # Create a skill that already exists in the library
     existing = Skill(
@@ -301,13 +305,17 @@ def test_evolve_patches_existing_skill_instead_of_synthesis():
 
 def test_evolve_falls_through_to_synthesis_for_new_gaps():
     """Gaps with no existing skill should go to synthesis, not patch."""
+    import tempfile
     from arise.agent import ARISE
+    from arise.config import ARISEConfig
     from arise.types import GapAnalysis, SandboxResult, SkillStatus
 
     agent_fn = MagicMock(return_value="ok")
     reward_fn = MagicMock(return_value=0.0)
 
-    arise = ARISE(agent_fn=agent_fn, reward_fn=reward_fn)
+    tmpdir = tempfile.mkdtemp()
+    config = ARISEConfig(skill_store_path=f"{tmpdir}/skills", trajectory_store_path=f"{tmpdir}/traj")
+    arise = ARISE(agent_fn=agent_fn, reward_fn=reward_fn, config=config)
 
     failure = Trajectory(task="need new tool", outcome="failed", reward=0.0)
     failure.steps.append(Step(
