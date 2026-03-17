@@ -1,0 +1,62 @@
+default_agent: arise_devops
+agents:
+  arise_devops:
+    name: arise_devops
+    language: python
+    node_version: null
+    entrypoint: agent.py
+    deployment_type: container
+    runtime_type: null
+    platform: linux/amd64
+    container_runtime: docker
+    source_path: .
+    aws:
+      execution_role: arn:aws:iam::436776987862:role/AmazonBedrockAgentCoreSDKRuntime-us-west-2-331c7a03e7
+      execution_role_auto_create: false
+      account: '436776987862'
+      region: us-west-2
+      ecr_repository: 436776987862.dkr.ecr.us-west-2.amazonaws.com/arise-devops
+      ecr_auto_create: false
+      s3_path: null
+      s3_auto_create: false
+      network_configuration:
+        network_mode: PUBLIC
+        network_mode_config: null
+      protocol_configuration:
+        server_protocol: A2A
+      observability:
+        enabled: true
+      lifecycle_configuration:
+        idle_runtime_session_timeout: null
+        max_lifetime: null
+    bedrock_agentcore:
+      agent_id: arise_devops-8nbEhH7uPH
+      agent_arn: arn:aws:bedrock-agentcore:us-west-2:436776987862:runtime/arise_devops-8nbEhH7uPH
+      agent_session_id: e0712fee-6732-4b7f-9cfc-02abc7299957
+    codebuild:
+      project_name: null
+      execution_role: null
+      source_bucket: null
+    memory:
+      mode: NO_MEMORY
+      memory_id: null
+      memory_arn: null
+      memory_name: null
+      event_expiry_days: 30
+      first_invoke_memory_check_done: false
+      was_created_by_toolkit: false
+    identity:
+      credential_providers: []
+      workload: null
+    aws_jwt:
+      enabled: false
+      audiences: []
+      signing_algorithm: ES384
+      issuer_url: null
+      duration_seconds: 300
+    authorizer_configuration: null
+    request_header_configuration: null
+    oauth_configuration: null
+    api_key_env_var_name: null
+    api_key_credential_provider_name: null
+    is_generated_by_agentcore_create: false

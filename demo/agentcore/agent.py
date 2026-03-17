@@ -1,31 +1,23 @@
-"""Self-evolving DevOps agent served as an A2A server.
+"""Self-evolving DevOps agent served as an A2A server on AgentCore."""
 
-Uses Strands Agent + ARISE in distributed mode. The agent starts with zero
-tools and evolves them over time via the S3/SQS pipeline.
-
-Run:
-    python agent.py
-
-Environment variables:
-    ARISE_SKILL_BUCKET  S3 bucket for evolving skill library
-    ARISE_QUEUE_URL     SQS queue URL for trajectory reporting
-    OPENAI_API_KEY      API key for ARISE skill synthesis (gpt-4o-mini)
-    AWS_REGION          AWS region (default: us-west-2)
-    PORT                Server port (default: 9000)
-"""
-
+import logging
 import os
 
 from strands import Agent
 from strands.models import BedrockModel
 from strands.multiagent.a2a import A2AServer
+from fastapi import FastAPI
+import uvicorn
 
 from arise import ARISEConfig, create_distributed_arise
 from arise.adapters.strands import strands_adapter
 from arise.rewards.builtin import task_success
 
+logging.basicConfig(level=logging.INFO)
+
 REGION = os.getenv("AWS_REGION", "us-west-2")
-PORT = int(os.getenv("PORT", "9000"))
+PORT = 9000
+runtime_url = os.environ.get("AGENTCORE_RUNTIME_URL", f"http://127.0.0.1:{PORT}/")
 
 # ---------------------------------------------------------------------------
 # ARISE config
@@ -54,7 +46,7 @@ bedrock_model = BedrockModel(
 )
 
 strands_agent = Agent(
-    name="arise-devops",
+    name="arise_devops",
     description="Self-evolving DevOps assistant that learns new tools over time.",
     model=bedrock_model,
     system_prompt=(
@@ -67,7 +59,7 @@ strands_agent = Agent(
 )
 
 # ---------------------------------------------------------------------------
-# ARISE wraps the agent in distributed mode (S3 skills + SQS trajectories)
+# ARISE wraps the agent in distributed mode
 # ---------------------------------------------------------------------------
 
 agent_fn = strands_adapter(strands_agent)
@@ -79,7 +71,6 @@ if config.s3_bucket and config.sqs_queue_url:
         config=config,
     )
 else:
-    # Local mode fallback for development
     from arise import ARISE
     arise = ARISE(
         agent_fn=agent_fn,
@@ -88,12 +79,24 @@ else:
     )
 
 # ---------------------------------------------------------------------------
-# A2A Server
+# A2A Server on AgentCore
 # ---------------------------------------------------------------------------
 
-a2a_server = A2AServer(agent=strands_agent)
+a2a_server = A2AServer(
+    agent=strands_agent,
+    http_url=runtime_url,
+    serve_at_root=True,
+)
+
+app = FastAPI()
+
+
+@app.get("/ping")
+def ping():
+    return {"status": "healthy"}
+
+
+app.mount("/", a2a_server.to_fastapi_app())
 
 if __name__ == "__main__":
-    print(f"Starting ARISE DevOps A2A server on port {PORT}...")
-    print(f"Agent card: http://localhost:{PORT}/.well-known/agent.json")
-    a2a_server.serve(host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
