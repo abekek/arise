@@ -1,0 +1,10 @@
+agent:
+  name: arise-devops-agent
+  entrypoint: agent.py
+  runtime: python3.11
+  memory: 512
+  timeout: 300
+  environment:
+    ARISE_SKILL_BUCKET: "${ARISE_SKILL_BUCKET}"
+    ARISE_QUEUE_URL: "${ARISE_QUEUE_URL}"
+    OPENAI_API_KEY: "${OPENAI_API_KEY}"
