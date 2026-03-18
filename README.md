@@ -200,6 +200,39 @@ reward.add_feedback(trajectory, score=0.9)
 arise = ARISE(agent_fn=my_agent, reward_fn=reward)
 ```
 
+### Cost Tracking
+
+Track LLM spend automatically:
+
+```python
+from arise import cost_tracker
+
+# After running episodes...
+print(cost_tracker.summary())
+# {"total_calls": 64, "total_input_tokens": 125000, "total_output_tokens": 42000, "total_cost_usd": 0.26}
+```
+
+---
+
+## Benchmark Results
+
+Evaluated on two proprietary-format domains where LLMs can't cheat with training data:
+
+| Model | Condition | AcmeCorp (SRE) | DataCorp (Data Eng) |
+|-------|-----------|---------------|-------------------|
+| **Claude Sonnet** | **ARISE** | **78%** | — |
+| Claude Sonnet | No tools | 63% | — |
+| GPT-4o-mini | ARISE | 57% | **92%** |
+| GPT-4o-mini | No tools | 48% | 50% |
+| GPT-4o-mini | Fixed tools | 48% | — |
+
+Key findings:
+- **ARISE improves both models**: +15pp (Claude), +9pp (GPT-4o-mini) on AcmeCorp; +42pp on DataCorp
+- **Self-evolved tools > hand-written tools**: 57% vs 48% — ARISE tailors tools to how the agent actually works
+- **Fewer tools can be better**: Claude achieved 78% with just 2 tools; GPT-4o-mini needed 21
+
+See [`benchmarks/`](./benchmarks/) for the full evaluation suite and [`paper/`](./paper/) for the research paper.
+
 ---
 
 ## Safety

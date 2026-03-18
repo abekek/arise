@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "arise-ai"
-version = "0.1.1"
+version = "0.1.2"
 description = "Self-evolving agent framework — agents that create their own tools"
 readme = "README.md"
 license = "MIT"
