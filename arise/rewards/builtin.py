@@ -4,14 +4,38 @@ from arise.types import Trajectory
 
 
 def task_success(trajectory: Trajectory) -> float:
-    if trajectory.metadata.get("success"):
+    """Basic reward based on explicit signals only.
+
+    Checks in order:
+    1. metadata['success'] — explicit True/False from the caller
+    2. metadata['expected'] — if provided, checks if it appears in outcome
+    3. Step errors — if any step raised an exception
+    4. Otherwise returns 1.0 (assumes success)
+
+    Pass signals via arise.run(task, success=True/False, expected="answer").
+    """
+    # Explicit success/failure
+    if trajectory.metadata.get("success") is True:
         return 1.0
-    if trajectory.outcome and "error" not in trajectory.outcome.lower():
-        return 1.0
-    return 0.0
+    if trajectory.metadata.get("success") is False:
+        return 0.0
+
+    # Expected answer matching
+    expected = trajectory.metadata.get("expected")
+    if expected is not None:
+        if str(expected) in trajectory.outcome:
+            return 1.0
+        return 0.0
+
+    # Step-level errors (tool calls that threw exceptions)
+    if any(s.error for s in trajectory.steps):
+        return 0.0
+
+    return 1.0
 
 
 def code_execution_reward(trajectory: Trajectory) -> float:
+    """Reward based on tool execution errors. 1.0 if no errors, -0.25 per error."""
     errors = sum(1 for s in trajectory.steps if s.error)
     if errors == 0:
         return 1.0
@@ -19,7 +43,8 @@ def code_execution_reward(trajectory: Trajectory) -> float:
 
 
 def answer_match_reward(trajectory: Trajectory) -> float:
-    expected = trajectory.metadata.get("expected_output", "")
+    """Reward based on matching expected output. Checks metadata['expected_output'] or metadata['expected']."""
+    expected = trajectory.metadata.get("expected_output") or trajectory.metadata.get("expected", "")
     if not expected:
         return 0.5
     if trajectory.outcome.strip() == str(expected).strip():

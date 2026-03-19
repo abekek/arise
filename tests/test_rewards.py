@@ -19,8 +19,20 @@ def test_task_success_from_outcome():
     t = Trajectory(task="test", outcome="42")
     assert task_success(t) == 1.0
 
+    # Without explicit signals, outcome text alone doesn't determine failure
     t2 = Trajectory(task="test", outcome="Error: something went wrong")
-    assert task_success(t2) == 0.0
+    assert task_success(t2) == 1.0  # no explicit failure signal set
+
+    # Use metadata to signal failure explicitly
+    t3 = Trajectory(task="test", outcome="Error: something went wrong", metadata={"success": False})
+    assert task_success(t3) == 0.0
+
+    # Use expected to check answer
+    t4 = Trajectory(task="test", outcome="wrong answer", metadata={"expected": "right answer"})
+    assert task_success(t4) == 0.0
+
+    t5 = Trajectory(task="test", outcome="the right answer is here", metadata={"expected": "right answer"})
+    assert task_success(t5) == 1.0
 
 
 def test_code_execution_reward():
