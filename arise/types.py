@@ -161,6 +161,11 @@ class TestResult:
     execution_time_ms: float = 0.0
 
 
+class SkillValidationError(Exception):
+    """Raised when a pulled skill fails sandbox validation."""
+    pass
+
+
 @dataclass
 class SandboxResult:
     success: bool

@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from arise.registry.models import RegistryEntry
-from arise.types import Skill, SkillOrigin
+from arise.types import Skill, SkillOrigin, SkillValidationError
 
 
 def _entry_to_dict(entry: RegistryEntry) -> dict:
@@ -50,6 +51,59 @@ def _skill_from_entry(entry: RegistryEntry) -> Skill:
         version=entry.version,
         origin=SkillOrigin.SYNTHESIZED,
     )
+
+
+def export_skills(library, output_path: str) -> int:
+    """Export all active skills from a SkillLibrary as a JSON file.
+
+    Returns the number of skills exported.
+    """
+    skills = library.get_active_skills()
+    records = []
+    for s in skills:
+        records.append({
+            "name": s.name,
+            "description": s.description,
+            "implementation": s.implementation,
+            "test_suite": s.test_suite,
+            "tags": [],
+            "version": s.version,
+        })
+    Path(output_path).write_text(json.dumps(records, indent=2))
+    return len(records)
+
+
+def import_skills(input_path: str, library, sandbox=None) -> list[Skill]:
+    """Import skills from a JSON file into a SkillLibrary.
+
+    If sandbox is provided, each skill is validated before being added.
+    Skills that fail validation are skipped (a warning is printed).
+
+    Returns the list of successfully imported skills.
+    """
+    data = json.loads(Path(input_path).read_text())
+    imported: list[Skill] = []
+    for record in data:
+        skill = Skill(
+            name=record["name"],
+            description=record.get("description", ""),
+            implementation=record["implementation"],
+            test_suite=record.get("test_suite", ""),
+            version=record.get("version", 1),
+            origin=SkillOrigin.SYNTHESIZED,
+        )
+        if sandbox is not None:
+            result = sandbox.test_skill(skill)
+            if not result.success:
+                print(
+                    f"[ARISE:import] Skipping '{skill.name}': failed sandbox validation",
+                    flush=True,
+                )
+                continue
+        library.add(skill)
+        library.promote(skill.id)
+        imported.append(skill)
+    return imported
 
 
 class SkillRegistry:
@@ -151,8 +205,21 @@ class SkillRegistry:
         print(f"[ARISE:registry] Published '{skill.name}' v{new_version}", flush=True)
         return entry
 
-    def search(self, query: str, limit: int = 10) -> list[RegistryEntry]:
-        """Search registry by keyword matching on name + description + tags."""
+    def search(
+        self,
+        query: str,
+        tags: list[str] | None = None,
+        sort_by: str = "success_rate",
+        limit: int = 10,
+    ) -> list[RegistryEntry]:
+        """Search registry by keyword matching on name + description + tags.
+
+        Args:
+            query: Search query string.
+            tags: If provided, only return entries whose tags overlap with these.
+            sort_by: Sort results by "success_rate" (default) or "relevance".
+            limit: Maximum number of results.
+        """
         index = self._read_index()
         skills_map: dict[str, list[int]] = index.get("skills", {})
 
@@ -171,6 +238,12 @@ class SkillRegistry:
             if entry is None:
                 continue
 
+            # Filter by tags if specified
+            if tags:
+                entry_tags_lower = {t.lower() for t in entry.tags}
+                if not entry_tags_lower.intersection(t.lower() for t in tags):
+                    continue
+
             # Score by keyword overlap
             score = 0
             text_lower = f"{entry.name} {entry.description} {' '.join(entry.tags)}".lower()
@@ -181,12 +254,25 @@ class SkillRegistry:
             if score > 0:
                 results.append((score, entry))
 
-        # Sort by score descending
-        results.sort(key=lambda x: x[0], reverse=True)
+        if sort_by == "success_rate":
+            results.sort(key=lambda x: x[1].avg_success_rate, reverse=True)
+        else:
+            results.sort(key=lambda x: x[0], reverse=True)
+
         return [entry for _, entry in results[:limit]]
 
-    def pull(self, name: str, version: int | None = None) -> Skill:
-        """Pull a skill from registry and return as Skill object."""
+    def pull(self, name: str, version: int | None = None, validate: bool = True, sandbox=None) -> Skill:
+        """Pull a skill from registry and return as Skill object.
+
+        Args:
+            name: Skill name to pull.
+            version: Specific version to pull (defaults to latest).
+            validate: If True and sandbox is provided, run sandbox.test_skill() on the pulled skill.
+            sandbox: Sandbox instance for validation.
+
+        Raises:
+            SkillValidationError: If validate=True, sandbox is provided, and the skill fails testing.
+        """
         index = self._read_index()
         skills_map: dict[str, list[int]] = index.get("skills", {})
 
@@ -200,9 +286,19 @@ class SkillRegistry:
         if entry is None:
             raise ValueError(f"Skill '{name}' v{version} not found in registry")
 
+        skill = _skill_from_entry(entry)
+
+        if validate and sandbox is not None:
+            result = sandbox.test_skill(skill)
+            if not result.success:
+                raise SkillValidationError(
+                    f"Skill '{name}' v{version} failed sandbox validation: "
+                    f"{result.total_failed} test(s) failed"
+                )
+
         # Increment downloads
         entry.downloads += 1
         self._write_entry(entry)
 
         print(f"[ARISE:registry] Pulled '{name}' v{version}", flush=True)
-        return _skill_from_entry(entry)
+        return skill
