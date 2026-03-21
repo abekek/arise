@@ -59,10 +59,16 @@ class ARISE:
                 from arise.adapters.strands import strands_adapter
 
                 agent_fn = strands_adapter(agent)
+            # Auto-detect LangGraph compiled graph (has get_graph method)
+            elif hasattr(agent, "get_graph"):
+                from arise.adapters.langgraph import langgraph_adapter
+
+                agent_fn = langgraph_adapter(agent)
             else:
                 raise TypeError(
                     f"Unsupported agent type: {type(agent).__name__}. "
-                    "Pass a Strands Agent or use agent_fn= with a custom wrapper."
+                    "Pass a Strands Agent, a LangGraph compiled graph, "
+                    "or use agent_fn= with a custom wrapper."
                 )
 
         if agent_fn is None:
