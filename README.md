@@ -258,7 +258,7 @@ See [SECURITY.md](./SECURITY.md) for the full threat model.
 
 | Function | Scores | Best for |
 |----------|--------|----------|
-| `task_success` | 1.0 if no error in outcome | General purpose |
+| `task_success` | Checks `expected=`, `success=`, step errors | General purpose |
 | `code_execution_reward` | 1.0 minus 0.25 per error | Tool-use agents |
 | `answer_match_reward` | 1.0 exact, 0.7 substring match | Q&A, extraction |
 | `efficiency_reward` | Penalizes extra steps | Concise agents |
@@ -268,15 +268,84 @@ See [SECURITY.md](./SECURITY.md) for the full threat model.
 
 ---
 
+### Evolution Reports + Telemetry
+
+Track what ARISE does during evolution:
+
+```python
+arise.run(task)
+
+# After evolution triggers:
+report = arise.last_evolution
+print(report.tools_promoted)    # ["compute_sha256"]
+print(report.tools_rejected)    # [{"name": "fetch_api", "reason": "sandbox failure"}]
+print(report.duration_ms)       # 45000
+print(arise.evolution_history)  # all past reports
+```
+
+Optional OpenTelemetry integration: `pip install arise-ai[otel]` — evolution steps become OTel spans.
+
+### Dashboard
+
+```bash
+arise dashboard ./skills              # terminal TUI (rich)
+arise dashboard ./skills --web        # web UI on localhost:8501
+arise dashboard ./skills --web --port 9000
+```
+
+### Distributed Setup
+
+One command to provision AWS resources:
+
+```bash
+arise setup-distributed --region us-west-2
+# Creates S3 bucket + SQS queue, saves config to .arise.json
+
+arise setup-distributed --destroy
+# Tears down resources
+```
+
+Or from Python:
+
+```python
+from arise.distributed import setup_distributed
+config = setup_distributed(region="us-west-2")
+# Returns ARISEConfig ready to use
+```
+
+### Skill Import/Export
+
+```bash
+arise registry export ./skills -o skills.json    # export skills as JSON
+arise registry import skills.json ./skills       # import with sandbox validation
+arise registry search "csv parsing" --tags json  # search registry
+```
+
+---
+
 ## CLI
 
 ```bash
+# Library management
 arise status ./skills          # Library stats
 arise skills ./skills          # List active skills with metrics
 arise inspect ./skills <id>    # View implementation + tests
 arise rollback ./skills <ver>  # Rollback to previous version
 arise export ./skills ./out    # Export as .py files
 arise evolve --dry-run         # Preview what would be synthesized
+
+# Dashboard
+arise dashboard ./skills              # Terminal TUI
+arise dashboard ./skills --web        # Web UI
+
+# Distributed
+arise setup-distributed --region us-west-2
+arise setup-distributed --destroy
+
+# Registry
+arise registry export ./skills -o skills.json
+arise registry import skills.json ./skills
+arise registry search "csv parsing" --tags json
 ```
 
 ---
@@ -304,12 +373,13 @@ config = ARISEConfig(
 
 | Example | Description |
 |---------|-------------|
+| [`quickstart_evolution.py`](./examples/quickstart_evolution.py) | Full evolution loop: agent fails → ARISE evolves tool → agent succeeds |
 | [`quickstart.py`](./examples/quickstart.py) | Math agent evolves statistics tools |
-| [`api_agent.py`](./examples/api_agent.py) | HTTP agent evolves auth + pagination (mock server, no deps) |
+| [`api_agent.py`](./examples/api_agent.py) | HTTP agent evolves auth + pagination (mock server) |
 | [`devops_agent.py`](./examples/devops_agent.py) | DevOps agent evolves log analysis tools |
 | [`coding_agent.py`](./examples/coding_agent.py) | Code agent evolves file manipulation tools |
 | [`strands_agent.py`](./examples/strands_agent.py) | Strands integration with Bedrock |
-| [`demo/agentcore/`](./demo/agentcore/) | Full AgentCore deployment with A2A protocol |
+| [`demo/agentcore/`](./demo/agentcore/) | AgentCore deployment with A2A protocol |
 
 ---
 
@@ -326,6 +396,8 @@ pip install arise-ai              # core (just pydantic)
 pip install arise-ai[aws]         # + boto3 for distributed mode
 pip install arise-ai[litellm]     # + litellm for multi-provider LLM
 pip install arise-ai[docker]      # + docker sandbox backend
+pip install arise-ai[dashboard]   # + rich, fastapi for dashboard
+pip install arise-ai[otel]        # + opentelemetry for tracing
 pip install arise-ai[all]         # everything
 ```
 
