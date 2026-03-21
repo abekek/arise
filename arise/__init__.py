@@ -5,7 +5,7 @@ from arise.skills.sandbox import Sandbox
 from arise.skills.forge import SkillForge
 from arise.skills.ab_test import SkillABTest
 from arise.stores.base import SkillStore, SkillStoreWriter, TrajectoryReporter
-from arise.types import Skill, SkillStatus, SkillOrigin, ToolSpec, Trajectory, Step, GapAnalysis
+from arise.types import Skill, SkillStatus, SkillOrigin, ToolSpec, Trajectory, Step, GapAnalysis, EvolutionReport
 from arise.registry import SkillRegistry
 from arise.llm_router import LLMRouter
 from arise.rewards.learned import LearnedReward
@@ -28,6 +28,7 @@ __all__ = [
     "Trajectory",
     "Step",
     "GapAnalysis",
+    "EvolutionReport",
     "SkillRegistry",
     "LLMRouter",
     "LearnedReward",

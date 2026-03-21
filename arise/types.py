@@ -167,6 +167,17 @@ class SkillValidationError(Exception):
 
 
 @dataclass
+class EvolutionReport:
+    timestamp: datetime = field(default_factory=datetime.now)
+    gaps_detected: list[str] = field(default_factory=list)
+    tools_synthesized: list[str] = field(default_factory=list)
+    tools_promoted: list[str] = field(default_factory=list)
+    tools_rejected: list[dict[str, str]] = field(default_factory=list)
+    duration_ms: float = 0.0
+    cost_usd: float = 0.0
+
+
+@dataclass
 class SandboxResult:
     success: bool
     test_results: list[TestResult] = field(default_factory=list)

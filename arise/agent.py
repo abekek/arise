@@ -16,7 +16,7 @@ from arise.stores.base import SkillStore, TrajectoryReporter
 from arise.stores.local import LocalSkillStore, LocalTrajectoryReporter
 from arise.trajectory.logger import TrajectoryLogger
 from arise.trajectory.store import TrajectoryStore
-from arise.types import Skill, SkillOrigin, SkillStatus, Step, ToolSpec, Trajectory
+from arise.types import EvolutionReport, Skill, SkillOrigin, SkillStatus, Step, ToolSpec, Trajectory
 
 
 class ARISE:
@@ -129,6 +129,7 @@ class ARISE:
         self._evolution_timestamps: list[float] = []
         self._last_evolution_episode = 0
         self._ab_tests: dict[str, SkillABTest] = {}
+        self.evolution_history: list[EvolutionReport] = []
 
     def run(self, task: str, **kwargs: Any) -> str:
         """Run a single task through the agent with the current tool library.
@@ -261,16 +262,22 @@ class ARISE:
         if self.forge is None or self.trajectory_store is None:
             return
 
-        self._evolution_timestamps.append(time.time())
+        evolve_start = time.time()
+        report = EvolutionReport()
+
+        self._evolution_timestamps.append(evolve_start)
         self._last_evolution_episode = self._episode_count
 
         failures = self.trajectory_store.get_failures(n=self.config.failure_threshold * 2)
         if not failures:
             if self.config.verbose:
                 print("[ARISE] No failures to analyze.")
+            report.duration_ms = (time.time() - evolve_start) * 1000
+            self.evolution_history.append(report)
             return
 
         gaps = self.forge.detect_gaps(failures, self._skill_store)
+        report.gaps_detected = [g.suggested_name for g in gaps]
         if self.config.verbose:
             print(f"[ARISE] Found {len(gaps)} capability gaps.")
 
@@ -284,6 +291,8 @@ class ARISE:
         if not patch_gaps and not new_gaps:
             if self.config.verbose:
                 print("[ARISE] All detected gaps already have active skills.")
+            report.duration_ms = (time.time() - evolve_start) * 1000
+            self.evolution_history.append(report)
             return
 
         # Try patching existing skills first
@@ -303,12 +312,15 @@ class ARISE:
                 result = self.sandbox.test_skill(patched)
                 if result.success:
                     self.start_ab_test(existing_skill, patched)
+                    report.tools_synthesized.append(name)
                     if self.config.verbose:
                         print(f"[ARISE] Patch for '{name}' passed sandbox — starting A/B test.")
                 else:
+                    report.tools_rejected.append({"name": name, "reason": "patch failed sandbox"})
                     if self.config.verbose:
                         print(f"[ARISE] Patch for '{name}' failed sandbox — skipping.")
             except Exception as e:
+                report.tools_rejected.append({"name": name, "reason": str(e)})
                 if self.config.verbose:
                     print(f"[ARISE] Failed to patch '{name}': {e}")
 
@@ -334,20 +346,25 @@ class ARISE:
                 for future in as_completed(futures):
                     result = future.result()
                     if result is None:
+                        gap = futures[future]
+                        report.tools_rejected.append({"name": gap.suggested_name, "reason": "synthesis exception"})
                         continue
                     gap, skill, success = result
+                    report.tools_synthesized.append(skill.name)
                     if success:
                         self.skill_library.add(skill)
                         self.skill_library.promote(skill.id)
+                        report.tools_promoted.append(skill.name)
                         if self.config.verbose:
                             print(f"[ARISE] Skill '{skill.name}' created and promoted!")
                     else:
+                        report.tools_rejected.append({"name": skill.name, "reason": "failed sandbox tests"})
                         self.skill_library.add(skill)
                         if self.config.verbose:
                             print(f"[ARISE] Skill '{skill.name}' added (testing).")
 
-        # Composition is disabled in v0.1 — it tends to create low-quality tools
-        # TODO: re-enable with better heuristics in v0.2
+        report.duration_ms = (time.time() - evolve_start) * 1000
+        self.evolution_history.append(report)
 
     def add_skill(self, fn: Callable, description: str = ""):
         """Manually add a Python function as a skill to the library.
@@ -386,6 +403,10 @@ class ARISE:
     @property
     def skills(self) -> list[Skill]:
         return self._skill_store.get_active_skills()
+
+    @property
+    def last_evolution(self) -> EvolutionReport | None:
+        return self.evolution_history[-1] if self.evolution_history else None
 
     @property
     def stats(self) -> dict:

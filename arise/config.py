@@ -46,5 +46,8 @@ class ARISEConfig:
     # Parallel synthesis
     max_synthesis_workers: int = 3  # max concurrent tool synthesis threads
 
+    # Telemetry
+    enable_telemetry: bool = False
+
     # Logging
     verbose: bool = True
