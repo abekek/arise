@@ -1,0 +1,103 @@
+# ARISE — Self-Evolving Agent Framework
+
+> ARISE is a Python middleware that gives LLM agents the ability to create their own tools at runtime. When an agent fails at a task, ARISE detects the capability gap, synthesizes a Python tool, validates it in a sandbox, and promotes it to the active library — no human intervention required.
+
+## Key Links
+
+- Documentation: https://arise-ai.dev
+- Full docs for LLMs: https://arise-ai.dev/llms-full.txt
+- GitHub: https://github.com/abekek/arise
+- PyPI: https://pypi.org/project/arise-ai/
+
+## Install
+
+```
+pip install arise-ai
+```
+
+## Quick Start
+
+```python
+from arise import ARISE
+from arise.rewards import task_success
+
+arise = ARISE(
+    agent_fn=my_agent,       # any (task, tools) -> str function
+    reward_fn=task_success,
+    model="gpt-4o-mini",     # cheap model for tool synthesis
+)
+
+result = arise.run("Fetch all users from the paginated API")
+# Agent fails → ARISE synthesizes fetch_all_paginated → agent succeeds
+```
+
+## How It Works
+
+1. **Observe** — every `arise.run(task)` produces a Trajectory (task, tool calls, outcome, reward)
+2. **Score** — your `reward_fn` returns a float in [0, 1]. Below 0.5 = failure
+3. **Detect** — after enough failures, an LLM analyzes failure trajectories to find capability gaps
+4. **Synthesize** — LLM generates a Python tool + test suite, runs in sandbox, adversarial testing
+5. **Promote** — passing tools become ACTIVE and available to the agent on the next run
+
+## Core API
+
+- `ARISE(agent_fn, reward_fn, model, config)` — main entry point
+- `arise.run(task, **kwargs)` — run a single task
+- `arise.train(tasks, num_episodes)` — run multiple tasks in a loop
+- `arise.evolve()` — manually trigger evolution
+- `arise.add_skill(fn, description)` — add a hand-written tool
+- `arise.remove_skill(name)` — deprecate a tool
+- `arise.rollback(version)` — roll back to a previous library version
+- `arise.skills` — list active skills
+- `arise.stats` — library statistics
+- `arise.last_evolution` — most recent evolution report
+
+## Configuration (ARISEConfig)
+
+Key fields:
+- `model` — LLM for synthesis (default: "gpt-4o-mini")
+- `sandbox_backend` — "subprocess" or "docker"
+- `failure_threshold` — consecutive failures before evolution (default: 5)
+- `allowed_imports` — whitelist of importable modules (set in production)
+- `max_evolutions_per_hour` — rate limit (default: 3)
+- `s3_bucket`, `sqs_queue_url` — for distributed mode
+
+## Framework Adapters
+
+ARISE works with any `(task, tools) -> str` function. Built-in adapters:
+- **Strands**: `ARISE(agent=strands_agent)` — auto-detected
+- **LangGraph**: `ARISE(agent=langgraph_graph)` — auto-detected
+- **CrewAI**: `crewai_adapter(crew)` — explicit
+
+## Reward Functions
+
+Built-in: `task_success`, `code_execution_reward`, `answer_match_reward`, `efficiency_reward`, `llm_judge_reward`
+
+Custom: any callable `(Trajectory) -> float`
+
+## Distributed Mode
+
+For stateless deployments (Lambda, ECS):
+- Agent reads skills from S3, reports trajectories to SQS
+- Background worker polls SQS, runs evolution, writes to S3
+- `create_distributed_arise()` factory function
+- `ARISEWorker` for the background process
+
+## CLI
+
+- `arise status` — library summary
+- `arise skills` — list active skills
+- `arise inspect <id>` — view skill implementation
+- `arise rollback <version>` — roll back
+- `arise export` — export skills as .py files
+- `arise evolve --dry-run` — preview what would be synthesized
+- `arise dashboard` — TUI or web dashboard
+- `arise setup-distributed` — provision AWS resources
+
+## Safety
+
+- Sandbox (subprocess or Docker)
+- Adversarial testing by separate LLM
+- Import restrictions via `allowed_imports`
+- Version control with rollback
+- A/B testing for skill patches

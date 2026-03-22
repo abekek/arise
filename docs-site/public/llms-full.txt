@@ -1,0 +1,2500 @@
+# ARISE — Complete Documentation
+
+## ARISE — Self-Evolving Agent Framework
+
+**Your agent works great on the tasks you planned for. ARISE handles the ones you didn't.**
+
+ARISE is a framework-agnostic middleware that gives LLM agents the ability to create their own tools at runtime. When your agent fails at a task, ARISE detects the capability gap, synthesizes a Python tool, validates it in a sandbox, and promotes it to the active library — no human intervention required.
+
+```bash
+pip install arise-ai
+```
+
+```python
+from arise import ARISE
+from arise.rewards import task_success
+
+arise = ARISE(
+    agent_fn=my_agent,       # any (task, tools) -> str function
+    reward_fn=task_success,
+    model="gpt-4o-mini",     # cheap model for tool synthesis
+)
+
+result = arise.run("Fetch all users from the paginated API")
+# Agent fails → ARISE synthesizes fetch_all_paginated → agent succeeds
+```
+
+**What it looks like in your terminal:**
+
+```
+Episode 1  | FAIL  | reward=0.00 | skills=2   Task: "Fetch paginated users with auth"
+Episode 2  | FAIL  | reward=0.00 | skills=2
+Episode 3  | FAIL  | reward=0.00 | skills=2
+
+[Evolution triggered — 3 failures on API tasks]
+  → Synthesizing 'parse_json_response'... 3/3 tests passed ✓
+  → Synthesizing 'fetch_all_paginated'... sandbox fail → refine → 1/1 passed ✓
+
+Episode 4  | OK    | reward=1.00 | skills=4   Agent now has the tools it needs
+```
+
+---
+
+### Key Features
+
+- **Self-evolving tool library** — fail → detect gap → synthesize → test → promote
+- **Framework-agnostic** — any `(task, tools) -> str` function, Strands, LangGraph, CrewAI
+- **Sandboxed validation** — subprocess or Docker, adversarial testing, import restrictions
+- **Distributed mode** — S3 + SQS for stateless deployments (Lambda, ECS, AgentCore)
+- **Skill registry** — share evolved tools across projects
+- **Version control + rollback** — SQLite checkpoints, `arise rollback <version>`
+- **A/B testing** — refined skills tested against originals before promotion
+- **Reward learning** — learn reward functions from human feedback
+
+---
+
+### Get Started
+
+- [Installation](/getting-started/installation/)
+- [Quick Start](/getting-started/quickstart/)
+- [How It Works](/getting-started/how-it-works/)
+
+---
+
+### Benchmark Results
+
+| Model | Condition | AcmeCorp (SRE) | DataCorp (Data Eng) |
+|-------|-----------|---------------|-------------------|
+| **Claude Sonnet** | **ARISE** | **78%** | — |
+| Claude Sonnet | No tools | 63% | — |
+| GPT-4o-mini | ARISE | 57% | **92%** |
+| GPT-4o-mini | No tools | 48% | 50% |
+
+ARISE improves task success by **+9–42 percentage points** across models and domains. Self-evolved tools consistently outperform hand-written baselines because they're shaped by the agent's actual failure patterns.
+
+[Full benchmark details →](/benchmarks/)
+
+---
+
+## Installation
+
+### Requirements
+
+- Python 3.11+
+- An LLM API key (OpenAI, Anthropic, or any [LiteLLM](https://github.com/BerriAI/litellm)-supported provider)
+
+### Install
+
+```bash
+pip install arise-ai
+```
+
+The core package depends only on `pydantic`. Everything else is optional.
+
+### Optional Extras
+
+Install extras based on your use case:
+
+```bash
+pip install arise-ai[aws]        # boto3 — for distributed mode (S3 + SQS)
+pip install arise-ai[litellm]    # litellm — multi-provider LLM routing
+pip install arise-ai[docker]     # docker SDK — Docker sandbox backend
+pip install arise-ai[dashboard]  # rich + fastapi — TUI and web dashboard
+pip install arise-ai[otel]       # opentelemetry — evolution step tracing
+pip install arise-ai[all]        # everything
+```
+
+| Extra | Adds | Use when |
+|-------|------|----------|
+| `[aws]` | boto3 | Running distributed mode with S3/SQS, or using SkillRegistry |
+| `[litellm]` | litellm | Using Anthropic, Google, Ollama, or any non-OpenAI model |
+| `[docker]` | docker | Using `sandbox_backend="docker"` in production |
+| `[dashboard]` | rich, fastapi | Running `arise dashboard` or `arise dashboard --web` |
+| `[otel]` | opentelemetry-sdk | Sending evolution spans to your observability stack |
+| `[all]` | all of the above | Development or full-featured deployments |
+
+### Framework Dependencies
+
+ARISE integrates with agent frameworks but does not depend on them. Install the framework separately:
+
+```bash
+pip install strands-agents          # Strands Agents (Bedrock)
+pip install langgraph langchain-core  # LangGraph
+pip install crewai                  # CrewAI
+```
+
+See [Framework Adapters](/guide/adapters/) for integration details.
+
+### Verify
+
+```python
+import arise
+print(arise.__version__)  # 0.1.4
+```
+
+### Environment Variables
+
+Set your LLM provider API key before running:
+
+```bash
+export OPENAI_API_KEY=sk-...          # OpenAI
+export ANTHROPIC_API_KEY=sk-ant-...   # Anthropic (via litellm)
+export AWS_DEFAULT_REGION=us-east-1   # AWS (distributed mode)
+```
+
+Tip: Using non-OpenAI models
+
+Install `arise-ai[litellm]` and prefix your model string with the provider:
+
+```python
+arise = ARISE(model="anthropic/claude-3-haiku-20240307", ...)
+arise = ARISE(model="gemini/gemini-1.5-flash", ...)
+arise = ARISE(model="ollama/llama3", ...)
+```
+
+---
+
+## Quick Start
+
+This walkthrough shows the complete evolution loop: an agent that can't do a task, ARISE detecting the gap, synthesizing a tool, and the agent succeeding on retry.
+
+The full example lives at [`examples/quickstart_evolution.py`](https://github.com/abekek/arise/blob/main/examples/quickstart_evolution.py).
+
+### Setup
+
+```bash
+pip install arise-ai[litellm]
+export OPENAI_API_KEY=sk-...
+```
+
+### Step 1: Define your agent function
+
+ARISE requires a function with signature `(task: str, tools: list) -> str`. Each tool in the list is a `ToolSpec` with `.name`, `.description`, and `.fn` attributes.
+
+```python
+import io, contextlib
+from arise.llm import llm_call
+
+def agent_fn(task: str, tools: list) -> str:
+    tool_map = {t.name: t.fn for t in tools}
+    tool_desc = "\n".join(f"- {t.name}: {t.description}" for t in tools)
+
+    code = llm_call([{"role": "user", "content": (
+        f"TOOLS:\n{tool_desc}\n\nTASK: {task}\n\n"
+        "Write Python that calls ONLY the tools above. Print the final answer.\n"
+        "If no tool fits, print 'TOOL_MISSING: <what you need>'. Code only, no markdown."
+    )}], model="gpt-4o-mini")
+
+    code = code.strip().removeprefix("```python").removeprefix("```").removesuffix("```")
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            exec(code, dict(tool_map))
+        return buf.getvalue().strip() or "No output"
+    except Exception as e:
+        return f"Error: {e}"
+```
+
+### Step 2: Define a reward function
+
+The reward function receives a `Trajectory` and returns a float in `[0.0, 1.0]`. Here we check whether the output contains a valid SHA-256 hash:
+
+```python
+import re
+from arise.types import Trajectory
+
+def sha256_reward(trajectory: Trajectory) -> float:
+    outcome = trajectory.outcome or ""
+    return 1.0 if re.search(r"\b[a-f0-9]{64}\b", outcome) else 0.0
+```
+
+### Step 3: Bootstrap with a seed skill
+
+Start the library with a single tool. ARISE will evolve more as needed.
+
+```python
+import inspect
+from arise import ARISE, SkillLibrary
+from arise.config import ARISEConfig
+from arise.types import Skill, SkillOrigin, SkillStatus
+
+def read_file(path: str) -> str:
+    """Read and return the contents of a file."""
+    with open(path) as f:
+        return f.read()
+
+library = SkillLibrary("./arise_skills")
+skill = Skill(
+    name="read_file",
+    description="Read a file's contents",
+    implementation=inspect.getsource(read_file),
+    origin=SkillOrigin.MANUAL,
+    status=SkillStatus.ACTIVE,
+)
+library.add(skill)
+library.promote(skill.id)
+```
+
+### Step 4: Create the ARISE instance
+
+```python
+arise = ARISE(
+    agent_fn=agent_fn,
+    reward_fn=sha256_reward,
+    model="gpt-4o-mini",
+    skill_library=library,
+    config=ARISEConfig(
+        failure_threshold=1,        # evolve after just 1 failure (demo)
+        max_evolutions_per_hour=5,
+        verbose=True,
+    ),
+)
+```
+
+### Step 5: Run — watch the agent fail, then succeed
+
+```python
+task = "Compute the SHA-256 hash of /tmp/arise_demo/hello.txt"
+
+# First run: agent fails — no hashing tool available
+result = arise.run(task)
+# [ARISE] Episode 1 | FAIL | reward=0.00 | skills=1
+
+# Trigger evolution manually (or let it happen automatically after enough failures)
+arise.evolve()
+# [ARISE] Evolution triggered — analyzing gaps...
+# [ARISE] Found 1 capability gaps.
+# [ARISE] Synthesizing 1 tools in parallel (max_workers=3)...
+# [ARISE] Skill 'compute_sha256' created and promoted!
+
+# Check what was synthesized
+for s in arise.skills:
+    print(f"  - {s.name} ({s.origin.value})")
+# - read_file (manual)
+# - compute_sha256 (synthesized)
+
+# Second run: agent uses the new tool and succeeds
+result = arise.run(task)
+# [ARISE] Episode 2 | OK | reward=1.00 | skills=2
+print(result)
+# b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576...
+```
+
+### What you'd see in the terminal
+
+```
+============================================================
+STEP 1: Agent attempts task (should fail)
+============================================================
+[ARISE] Episode 1 | FAIL | reward=0.00 | skills=1
+Result: TOOL_MISSING: sha256 hashing
+
+============================================================
+STEP 2: ARISE evolves new tools from failure
+============================================================
+[ARISE] Evolution triggered — analyzing gaps...
+[ARISE] Found 1 capability gaps.
+[ARISE] Synthesizing 1 tools in parallel (max_workers=3)...
+[ARISE] Skill 'compute_sha256' created and promoted!
+
+Active skills after evolution:
+  - read_file (manual)
+  - compute_sha256 (synthesized)
+
+============================================================
+STEP 3: Agent retries task (should succeed)
+============================================================
+[ARISE] Episode 2 | OK | reward=1.00 | skills=2
+Result: b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576...
+
+Expected: b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576...
+Match:    True
+```
+
+### Next steps
+
+- Run multiple tasks in sequence with [`arise.train(tasks)`](/reference/api-arise/)
+- Check evolution reports: `arise.last_evolution.tools_promoted`
+- Explore the [reward functions guide](/guide/rewards/) for production-ready scoring
+- See [Framework Adapters](/guide/adapters/) to use Strands, LangGraph, or CrewAI
+- View your skill library with `arise status ./arise_skills`
+
+Tip: Automatic evolution
+
+In production, you don't need to call `evolve()` manually. ARISE triggers it automatically after `failure_threshold` consecutive failures. Set a higher threshold (default: 5) so evolution is triggered by meaningful patterns, not noise.
+
+---
+
+## How It Works
+
+ARISE sits between your agent and its tool library. Every time your agent runs a task, ARISE records what happened, evaluates how well it went, and — when enough failures accumulate — synthesizes new tools to fill the gaps.
+
+### The Evolution Loop
+
+```mermaid
+flowchart TD
+    A["Agent receives task"] --> B["Execute with current tools"]
+    B --> C{"Success?"}
+    C -- "Yes" --> D["Log trajectory, continue"]
+    C -- "No" --> E["Log failure trajectory"]
+    E --> F{"Enough failures?"}
+    F -- No --> D
+    F -- Yes --> G["Detect capability gaps"]
+    G --> H["LLM synthesizes tool + tests"]
+    H --> I["Sandbox + adversarial validation"]
+    I --> J{"Pass?"}
+    J -- Yes --> K["Promote to active library"]
+    J -- No --> L["Refine and retry"]
+    L --> H
+    K --> A
+```
+
+### The 5 Steps in Detail
+
+#### 1. Observe
+
+Every call to `arise.run(task)` produces a `Trajectory`: a record of the task, every tool call the agent made (with inputs, outputs, and errors), the final outcome, and the reward score.
+
+Trajectories are stored locally in SQLite (or sent to SQS in distributed mode). ARISE keeps the most recent `max_trajectories` records (default: 1,000).
+
+#### 2. Score
+
+After each episode, the `reward_fn` you provide evaluates the trajectory and returns a float in `[0.0, 1.0]`. Scores below `0.5` are counted as failures. ARISE watches two conditions:
+
+- **Failure threshold**: if the last `failure_threshold` episodes (default: 5) are all failures, evolution triggers.
+- **Plateau detection**: if success rate hasn't improved by `plateau_min_improvement` (default: 5%) over the last `plateau_window` (default: 10) episodes, evolution triggers even without a failure streak.
+
+#### 3. Detect
+
+When evolution triggers, ARISE sends the recent failure trajectories to an LLM (the cheap `model` you set in config, not your agent's model). The LLM analyzes:
+
+- What tasks failed
+- What errors appeared in tool calls
+- What tools the agent tried to call that didn't exist
+- What the agent said it needed but couldn't do
+
+The output is a list of `GapAnalysis` objects — each with a description, evidence, a suggested function name, and a suggested signature.
+
+#### 4. Synthesize
+
+For each detected gap, ARISE:
+
+1. **Checks the registry** (if `registry_check_before_synthesis=True`) — if a proven skill already exists there, pulls it instead of calling the LLM.
+2. **Calls the LLM** to write a Python function implementing the tool, along with a test suite.
+3. **Runs the tests in a sandbox** (subprocess or Docker). If tests fail, ARISE refines and retries up to `max_refinement_attempts` times.
+4. **Runs adversarial validation** — a separate LLM call specifically tries to break the tool with edge cases, type boundaries, and security-probing inputs.
+5. If adversarial validation fails, ARISE refines again and re-tests.
+
+For existing skills that are failing on specific inputs, ARISE instead runs a **patch** — a minimal targeted fix — and starts an A/B test between the original and the patched version.
+
+Synthesis runs in parallel (up to `max_synthesis_workers=3` concurrent threads).
+
+#### 5. Promote
+
+A skill that passes both the sandbox tests and adversarial validation is marked `ACTIVE` and added to the tool library. On the next `arise.run()` call, the agent has access to the new tool.
+
+Every promotion is checkpointed in SQLite with a version number. You can roll back to any previous state with `arise rollback <version>` or `arise.rollback(version)`.
+
+### Skill Lifecycle
+
+`TESTING` → `ACTIVE` → `DEPRECATED`
+
+- **TESTING**: synthesized but not yet promoted (failed adversarial tests, or in A/B test)
+- **ACTIVE**: promoted, available to the agent
+- **DEPRECATED**: removed (lost A/B test, manually removed, or rollback)
+
+### A/B Testing
+
+When ARISE patches an existing skill, it doesn't replace it immediately. Instead, both versions run concurrently — each episode randomly uses one variant. After `min_episodes` (default: 20), the variant with the higher success rate wins and is promoted; the loser is deprecated.
+
+### Cost Control
+
+Evolution is rate-limited by `max_evolutions_per_hour` (default: 3). Each evolution cycle costs 3–5 LLM calls with gpt-4o-mini, so the worst case is roughly **$0.01–0.15/hour** for tool synthesis.
+
+Note: The synthesis model is separate from your agent's model
+
+ARISE uses a cheap model (`gpt-4o-mini` by default) for gap detection and tool synthesis. Your agent continues using whatever model you configured it with. You can customize routing with `model_routes` in `ARISEConfig`.
+
+---
+
+## Reward Functions
+
+The reward function is the signal ARISE uses to decide whether an agent succeeded. It receives a `Trajectory` and returns a float in `[0.0, 1.0]`. Scores below `0.5` are treated as failures.
+
+```python
+from arise.types import Trajectory
+
+def my_reward(trajectory: Trajectory) -> float:
+    ...
+    return 1.0  # success
+```
+
+### The Trajectory Object
+
+```python
+@dataclass
+class Trajectory:
+    task: str                        # the task string passed to arise.run()
+    steps: list[Step]                # every tool call the agent made
+    outcome: str                     # agent's final response (truncated to 1000 chars)
+    reward: float                    # filled in after reward_fn runs
+    skill_library_version: int       # library version when this episode ran
+    timestamp: datetime
+    metadata: dict[str, Any]         # kwargs passed to arise.run(task, **kwargs)
+```
+
+Each `Step` in `trajectory.steps`:
+
+```python
+@dataclass
+class Step:
+    observation: str
+    reasoning: str
+    action: str              # tool name that was called
+    action_input: dict       # args passed to the tool
+    result: str              # tool return value (truncated to 500 chars)
+    error: str | None        # exception message if the tool raised
+    latency_ms: float
+```
+
+Pass signals to your reward function via `arise.run()` keyword arguments — they land in `trajectory.metadata`:
+
+```python
+arise.run(task, success=True)
+arise.run(task, expected="42")
+arise.run(task, expected_output="42", rubric="must be an integer")
+```
+
+---
+
+### Built-in Reward Functions
+
+All built-ins are importable from `arise.rewards`:
+
+```python
+from arise.rewards import (
+    task_success,
+    code_execution_reward,
+    answer_match_reward,
+    efficiency_reward,
+    llm_judge_reward,
+)
+```
+
+#### `task_success`
+
+General-purpose reward. Checks signals in order:
+
+1. `metadata['success']` — explicit `True`/`False` from the caller
+2. `metadata['expected']` — if provided, checks whether that string appears in `outcome`
+3. Step errors — returns `0.0` if any tool call raised an exception
+4. Falls back to `1.0` (assumes success)
+
+```python
+from arise.rewards import task_success
+
+arise = ARISE(agent_fn=my_agent, reward_fn=task_success)
+
+# Explicit control
+arise.run(task, success=True)
+arise.run(task, success=False)
+
+# Expected output matching
+arise.run(task, expected="Paris")  # 1.0 if "Paris" in outcome, else 0.0
+```
+
+**Best for:** general tasks where you can provide an explicit signal or expected answer.
+
+---
+
+#### `code_execution_reward`
+
+Scores based on tool execution errors: `1.0` if no errors, minus `0.25` per error, floored at `0.0`.
+
+```python
+from arise.rewards import code_execution_reward
+
+arise = ARISE(agent_fn=my_agent, reward_fn=code_execution_reward)
+```
+
+**Best for:** agents that call tools heavily (APIs, file I/O, code execution) where clean execution is the primary success signal.
+
+---
+
+#### `answer_match_reward`
+
+Strict output matching against `metadata['expected_output']` or `metadata['expected']`:
+
+- `1.0` — exact match (stripped)
+- `0.7` — substring match (case-insensitive)
+- `0.0` — no match
+- `0.5` — no expected value provided
+
+```python
+from arise.rewards import answer_match_reward
+
+arise.run("What is 2 + 2?", expected_output="4")
+```
+
+**Best for:** Q&A agents, extraction tasks, factual queries with known correct answers.
+
+---
+
+#### `efficiency_reward`
+
+Penalizes extra steps. Score = `max(0.0, 1.0 - (n_steps - 1) * 0.1)`. An agent that solves a task in 1 step gets `1.0`; each additional step reduces the score by `0.1`.
+
+```python
+from arise.rewards import efficiency_reward
+```
+
+**Best for:** agents where conciseness matters — penalizes agents that call tools redundantly or loop unnecessarily.
+
+---
+
+#### `llm_judge_reward`
+
+Uses an LLM to rate the trajectory quality on a 0–1 scale. Sends the task, outcome, and step summary to the judge model.
+
+```python
+from arise.rewards import llm_judge_reward
+from functools import partial
+
+reward = partial(llm_judge_reward, model="gpt-4o-mini")
+arise = ARISE(agent_fn=my_agent, reward_fn=reward)
+```
+
+**Cost:** ~$0.001 per call with gpt-4o-mini.
+
+**Best for:** open-ended tasks where correctness is hard to measure programmatically (summaries, plans, explanations).
+
+Warning: Cost
+
+`llm_judge_reward` makes an LLM call on every episode. At scale, prefer a programmatic reward and use `llm_judge_reward` only for evaluation or for tasks with no other signal.
+
+---
+
+### `LearnedReward`
+
+Learns from human feedback via few-shot prompting. Falls back to `task_success` until `min_examples` are collected.
+
+```python
+from arise.rewards.learned import LearnedReward
+
+reward = LearnedReward(
+    min_examples=10,          # fall back to task_success until this many examples
+    persist_path="./feedback", # save/load feedback across restarts
+    model="gpt-4o-mini",
+    max_examples=50,           # keep the most recent N examples
+)
+
+# Collect feedback from human review
+reward.add_feedback(trajectory, score=0.9)
+reward.add_feedback(trajectory2, score=0.2)
+
+arise = ARISE(agent_fn=my_agent, reward_fn=reward)
+```
+
+**Best for:** domain-specific tasks where success is subjective and you have humans to rate a few examples.
+
+---
+
+### `CompositeReward`
+
+Weighted blend of multiple reward functions.
+
+```python
+from arise.rewards import task_success, efficiency_reward, code_execution_reward
+from arise.rewards.composite import CompositeReward
+
+reward = CompositeReward([
+    (task_success,          0.6),  # weight 60%
+    (code_execution_reward, 0.3),  # weight 30%
+    (efficiency_reward,     0.1),  # weight 10%
+])
+
+arise = ARISE(agent_fn=my_agent, reward_fn=reward)
+```
+
+Weights are normalized automatically — they don't need to sum to 1.
+
+**Best for:** production systems where you care about correctness, tool health, and efficiency simultaneously.
+
+---
+
+### Writing a Custom Reward
+
+Any callable that takes a `Trajectory` and returns a float works:
+
+```python
+def domain_reward(trajectory: Trajectory) -> float:
+    """Custom reward for a report-generation agent."""
+    outcome = trajectory.outcome.lower()
+
+    # Must contain required sections
+    required = ["summary", "recommendations", "conclusion"]
+    if not all(kw in outcome for kw in required):
+        return 0.0
+
+    # Penalize tool errors
+    errors = sum(1 for s in trajectory.steps if s.error)
+    error_penalty = errors * 0.1
+
+    # Bonus for conciseness
+    length_bonus = 0.1 if len(outcome) < 2000 else 0.0
+
+    return max(0.0, min(1.0, 1.0 - error_penalty + length_bonus))
+
+arise = ARISE(agent_fn=my_agent, reward_fn=domain_reward)
+```
+
+Tip: Reward signals via metadata
+
+Pass signals from your application into the reward function using `arise.run()` kwargs:
+
+```python
+arise.run(task, validated=True, quality_score=0.87)
+
+# In your reward function:
+def my_reward(trajectory: Trajectory) -> float:
+    if trajectory.metadata.get("validated"):
+        return trajectory.metadata.get("quality_score", 0.5)
+    return 0.0
+```
+
+---
+
+## Safety & Validation
+
+ARISE generates and executes Python code at runtime. This page covers the built-in safety mechanisms and production recommendations.
+
+Warning: Generated code is untrusted
+
+All synthesized skills are untrusted third-party code until they pass the full validation pipeline. Apply the same security discipline you would to any user-submitted code.
+
+See [SECURITY.md](https://github.com/abekek/arise/blob/main/SECURITY.md) for the full threat model.
+
+---
+
+### Validation Pipeline
+
+Every synthesized skill passes through multiple layers before promotion:
+
+| Layer | What it does |
+|-------|-------------|
+| **Sandbox** | Runs tests in an isolated process or Docker container with a timeout |
+| **Test suite** | LLM writes tests alongside the tool; all must pass |
+| **Adversarial testing** | Separate LLM call tries to break the tool (edge cases, type boundaries, security) |
+| **Import restrictions** | `allowed_imports` whitelist blocks dangerous modules |
+| **Promotion gate** | Only skills passing all layers become `ACTIVE` |
+| **Version control** | SQLite checkpoint before every promotion; rollback anytime |
+
+---
+
+### Sandbox
+
+Generated code runs in an isolated environment. Configure it in `ARISEConfig`:
+
+```python
+from arise import ARISEConfig
+
+config = ARISEConfig(
+    sandbox_backend="docker",    # "subprocess" (default) or "docker"
+    sandbox_timeout=30,          # seconds before the sandbox kills the process
+)
+```
+
+#### subprocess (default)
+
+Runs generated code in a separate Python process. Provides process isolation and timeout enforcement, but **no network or filesystem isolation**. Suitable for development and trusted environments.
+
+#### Docker (recommended for production)
+
+Runs generated code in an isolated container:
+- No network access
+- Read-only filesystem
+- Resource limits (CPU, memory)
+- Hard process timeout
+
+```bash
+pip install arise-ai[docker]
+```
+
+```python
+config = ARISEConfig(
+    sandbox_backend="docker",
+    sandbox_timeout=30,
+)
+```
+
+Tip: Use Docker in production
+
+The subprocess backend is convenient but does not prevent a synthesized skill from reading environment variables, writing to disk, or making network calls. Use Docker for any workload where the agent processes untrusted input.
+
+---
+
+### Import Restrictions
+
+Use `allowed_imports` to whitelist which modules synthesized skills can use. When set, ARISE performs both static and dynamic analysis:
+
+- Static `import` / `from ... import` statements
+- Dynamic `__import__("module")` calls
+- `importlib.import_module("module")` calls
+- `exec()` / `eval()` containing import statements
+
+```python
+config = ARISEConfig(
+    allowed_imports=[
+        "json", "re", "hashlib", "csv", "math",
+        "base64", "datetime", "collections", "itertools",
+    ],
+)
+```
+
+Skills with disallowed imports are rejected and refined. If `allowed_imports` is `None` (the default), no restriction is applied.
+
+Warning: Always set `allowed_imports` in production
+
+Start with standard library modules only. Add third-party packages only as needed and after reviewing the risk. Never include `subprocess`, `socket`, `os.system`, or `requests` unless your use case specifically requires it.
+
+---
+
+### Adversarial Testing
+
+After the sandbox test suite passes, ARISE runs a second LLM call specifically designed to find weaknesses. The adversarial model generates inputs that target:
+
+- Edge cases (empty inputs, extreme values, boundary conditions)
+- Type boundary violations (passing strings where ints are expected)
+- Security-probing inputs (path traversal attempts, injection strings)
+- Unexpected data shapes
+
+If adversarial tests find a problem, ARISE refines the skill and re-tests before promotion. Skills that still fail after `max_refinement_attempts` are kept in `TESTING` status rather than promoted.
+
+---
+
+### Version Control & Rollback
+
+Every skill promotion is checkpointed with an integer version number. You can inspect and roll back at any time:
+
+```bash
+# Check current library state
+arise status ./arise_skills
+
+# List skills with their origins
+arise skills ./arise_skills
+
+# View a specific skill's implementation and tests
+arise inspect ./arise_skills <skill_id>
+
+# Roll back to a previous version
+arise rollback ./arise_skills 3
+```
+
+From Python:
+
+```python
+arise.rollback(version=3)
+```
+
+Rolling back restores the exact set of active skills from that checkpoint. The rolled-back versions are not deleted — you can roll forward again.
+
+---
+
+### Skill Registry Security
+
+The `SkillRegistry` distributes executable Python code via S3. Treat registry entries with the same care as any code distribution system.
+
+**When pulling from a registry:**
+
+```python
+from arise import SkillRegistry
+from arise.skills.sandbox import Sandbox
+
+registry = SkillRegistry(bucket="my-registry")
+sandbox = Sandbox(backend="docker")
+
+# Always validate pulled skills
+skill = registry.pull("parse_csv", validate=True, sandbox=sandbox)
+
+# Pin a specific version — don't always pull latest
+skill = registry.pull("parse_csv", version=3)
+```
+
+**IAM permissions:**
+
+- Agent processes should have **read-only** S3 access (`s3:GetObject`, `s3:ListBucket`)
+- Only the worker process (or a dedicated publisher role) should have write access (`s3:PutObject`)
+- Enable S3 versioning on the registry bucket for rollback capability
+
+---
+
+### Rate Limiting
+
+Cap LLM spend for evolution with `max_evolutions_per_hour`:
+
+```python
+config = ARISEConfig(
+    max_evolutions_per_hour=3,   # default
+    max_library_size=50,         # cap total active skills
+)
+```
+
+When the rate limit is hit, ARISE skips the evolution cycle and logs a message. Failures continue to accumulate and evolution resumes in the next hour window.
+
+---
+
+### Production Recommendations
+
+1. **Set `allowed_imports`** — start with standard library only, add packages explicitly.
+2. **Use Docker sandbox** for any workload that processes untrusted input.
+3. **Review promoted skills** before deploying — use `arise inspect <id>` to read the implementation.
+4. **Restrict IAM permissions** — read-only S3 for agent processes; write access only for the worker.
+5. **Monitor evolution costs** — set `max_evolutions_per_hour` and watch cost_tracker output.
+6. **Set `max_library_size`** — prevents unbounded skill accumulation.
+7. **Enable OTel tracing** with `arise-ai[otel]` to observe evolution steps in your existing observability stack.
+
+---
+
+## Distributed Mode
+
+In local mode, ARISE stores skills in SQLite and runs evolution in-process. This works well for a single agent process but doesn't scale to stateless deployments (Lambda, ECS, AgentCore) where multiple instances share a tool library.
+
+Distributed mode decouples the agent from the evolution process using S3 (shared skill store) and SQS (trajectory queue).
+
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph Agent["Agent Process (stateless)"]
+        A1["Serve requests"]
+        A2["Read skills from S3"]
+        A3["Report trajectories"]
+    end
+    subgraph Worker["ARISE Worker"]
+        W1["Consume trajectories"]
+        W2["Detect gaps & evolve"]
+        W3["Promote skills"]
+    end
+    S3[(S3 Skill Store)]
+    SQS[[SQS Queue]]
+    A2 --> S3
+    A3 --> SQS
+    SQS --> W1
+    W3 --> S3
+```
+
+### Quick Setup
+
+#### 1. Provision AWS resources
+
+One command creates the S3 bucket, SQS queue, and DLQ, then saves the config to `.arise.json`:
+
+```bash
+pip install arise-ai[aws]
+
+arise setup-distributed --region us-west-2
+# Created S3 bucket: arn:aws:s3:::arise-skills-a1b2c3d4e5f6
+# Created SQS DLQ:   arn:aws:sqs:us-west-2:123456789:arise-trajectories-abc-dlq
+# Created SQS queue: arn:aws:sqs:us-west-2:123456789:arise-trajectories-abc
+# Config saved to .arise.json
+```
+
+Or from Python:
+
+```python
+from arise.distributed import setup_distributed
+
+config = setup_distributed(region="us-west-2")
+# Returns ARISEConfig with s3_bucket and sqs_queue_url populated
+```
+
+To tear down:
+
+```bash
+arise setup-distributed --destroy
+```
+
+#### 2. Configure the agent process
+
+Use `create_distributed_arise()` to build an ARISE instance that reads from S3 and reports to SQS:
+
+```python
+from arise import create_distributed_arise, ARISEConfig
+from arise.rewards import task_success
+
+config = ARISEConfig(
+    s3_bucket="arise-skills-a1b2c3d4e5f6",
+    sqs_queue_url="https://sqs.us-west-2.amazonaws.com/123456789/arise-trajectories-abc",
+    aws_region="us-west-2",
+    skill_cache_ttl_seconds=30,   # how often to refresh skills from S3
+)
+
+arise = create_distributed_arise(
+    agent_fn=my_agent,
+    reward_fn=task_success,
+    config=config,
+)
+
+# Use exactly like local ARISE
+result = arise.run(task)
+```
+
+In distributed mode, `arise.run()` fetches tools from S3 (with cache) and sends trajectories to SQS. Evolution does not run in-process.
+
+#### 3. Run the worker
+
+The worker polls SQS, buffers trajectories, and runs evolution when triggered. Run it as a separate process (ECS task, EC2 instance, or background thread):
+
+```python
+from arise import ARISEConfig
+from arise.worker import ARISEWorker
+
+config = ARISEConfig(
+    s3_bucket="arise-skills-a1b2c3d4e5f6",
+    sqs_queue_url="https://sqs.us-west-2.amazonaws.com/123456789/arise-trajectories-abc",
+    aws_region="us-west-2",
+    model="gpt-4o-mini",
+    failure_threshold=5,
+    verbose=True,
+)
+
+worker = ARISEWorker(config=config)
+worker.run_forever(poll_interval=5)  # long-running loop for ECS/EC2
+```
+
+For Lambda (invoked on SQS trigger):
+
+```python
+from arise.worker import ARISEWorker
+from arise.stores.sqs import deserialize_trajectory
+
+def lambda_handler(event, context):
+    worker = ARISEWorker(config=config)
+    trajectories = [
+        deserialize_trajectory(record["body"])
+        for record in event["Records"]
+    ]
+    worker.process_trajectories(trajectories)
+```
+
+### ARISEWorker Reference
+
+```python
+class ARISEWorker:
+    def __init__(self, config: ARISEConfig): ...
+
+    def run_forever(self, poll_interval: int = 5) -> None: ...
+    def run_once(self) -> int: ...
+    def process_trajectories(self, trajectories: list[Trajectory]) -> None: ...
+```
+
+| Method | Description |
+|--------|-------------|
+| `run_forever(poll_interval=5)` | Long-running loop for ECS/EC2. Polls SQS every `poll_interval` seconds, buffers trajectories, and triggers evolution when thresholds are met. |
+| `run_once()` | Poll SQS once, buffer trajectories, evolve if triggered. Returns count of messages processed. Use for cron-style invocations. |
+| `process_trajectories(trajectories)` | Directly process a list of `Trajectory` objects without SQS polling. Use in Lambda handlers where SQS delivers messages via event trigger. |
+
+### IAM Permissions
+
+**Agent process** needs:
+```json
+{
+  "Action": ["s3:GetObject", "s3:ListBucket"],
+  "Resource": ["arn:aws:s3:::arise-skills-*"]
+},
+{
+  "Action": ["sqs:SendMessage"],
+  "Resource": ["arn:aws:sqs:*:*:arise-trajectories-*"]
+}
+```
+
+**Worker process** additionally needs:
+```json
+{
+  "Action": ["s3:PutObject"],
+  "Resource": ["arn:aws:s3:::arise-skills-*"]
+},
+{
+  "Action": ["sqs:ReceiveMessage", "sqs:DeleteMessage"],
+  "Resource": ["arn:aws:sqs:*:*:arise-trajectories-*"]
+}
+```
+
+### AgentCore Deployment
+
+See [`demo/agentcore/`](https://github.com/abekek/arise/tree/main/demo/agentcore) for a complete example deploying ARISE with AWS AgentCore and the A2A protocol.
+
+Note: Skill cache TTL
+
+Agent processes cache skills from S3 for `skill_cache_ttl_seconds` (default: 30). After the worker promotes a new skill, agents pick it up within 30 seconds without restarting.
+
+---
+
+## Skill Registry
+
+The skill registry lets you share evolved tools across projects — like a package index for agent skills. Skills are stored in S3 and can be published, searched, and pulled by any project with access to the bucket.
+
+### Overview
+
+```python
+from arise import SkillRegistry
+from arise.skills.sandbox import Sandbox
+
+registry = SkillRegistry(
+    bucket="my-registry",
+    prefix="arise-registry",   # S3 key prefix (default)
+    region="us-east-1",
+)
+sandbox = Sandbox(backend="subprocess")
+```
+
+### Publishing Skills
+
+Publish a `Skill` object (typically from your active library) to the registry:
+
+```python
+# Get a skill from your active library
+for skill in arise.skills:
+    if skill.name == "parse_csv":
+        registry.publish(skill, tags=["csv", "parsing", "data"])
+        break
+```
+
+Publishing increments the version automatically. The registry stores:
+
+- Implementation source code
+- Test suite
+- Tags
+- Download count
+- Average success rate (updated on pull)
+
+### Searching
+
+```python
+results = registry.search(
+    query="csv parsing",
+    tags=["data"],       # optional tag filter
+    sort_by="success_rate",  # or "relevance"
+    limit=10,
+)
+
+for entry in results:
+    print(f"{entry.name} v{entry.version} — {entry.avg_success_rate:.0%} success — {entry.downloads} downloads")
+    print(f"  {entry.description}")
+    print(f"  tags: {', '.join(entry.tags)}")
+```
+
+Search matches on name, description, and tags. Results are sorted by `avg_success_rate` by default.
+
+From the CLI:
+
+```bash
+arise registry search "csv parsing" --tags data json
+```
+
+### Pulling Skills
+
+Pull a skill by name (latest version by default):
+
+```python
+skill = registry.pull("parse_csv")
+```
+
+Pull a specific version:
+
+```python
+skill = registry.pull("parse_csv", version=3)
+```
+
+Pull with sandbox validation (recommended):
+
+```python
+skill = registry.pull(
+    "parse_csv",
+    validate=True,
+    sandbox=sandbox,
+)
+```
+
+If validation fails, `SkillValidationError` is raised. The skill is not added to your library.
+
+After pulling, add the skill to your library:
+
+```python
+arise.skill_library.add(skill)
+arise.skill_library.promote(skill.id)
+```
+
+### Automatic Registry Check Before Synthesis
+
+Set `registry_check_before_synthesis=True` in `ARISEConfig` (the default) and ARISE will check the registry before calling the LLM during evolution. If a skill matching the detected gap already exists in the registry with a good success rate, it pulls and promotes that skill instead of synthesizing a new one.
+
+```python
+config = ARISEConfig(
+    registry_bucket="my-registry",
+    registry_prefix="arise-registry",
+    registry_check_before_synthesis=True,  # default
+)
+```
+
+### File-Based Import/Export
+
+Transfer skills as JSON files without requiring an S3 registry:
+
+```bash
+# Export all active skills to a JSON file
+arise registry export ./arise_skills -o skills.json
+
+# Import skills from JSON (with sandbox validation)
+arise registry import skills.json ./arise_skills
+```
+
+From Python:
+
+```python
+from arise.registry.client import export_skills, import_skills
+from arise.skills.library import SkillLibrary
+from arise.skills.sandbox import Sandbox
+
+lib = SkillLibrary("./arise_skills")
+sandbox = Sandbox()
+
+# Export
+count = export_skills(lib, "skills.json")
+print(f"Exported {count} skills")
+
+# Import (sandbox validation skipped if sandbox=None)
+imported = import_skills("skills.json", lib, sandbox=sandbox)
+print(f"Imported {len(imported)} skills")
+```
+
+The JSON format is a list of records:
+
+```json
+[
+  {
+    "name": "parse_csv",
+    "description": "Parse a CSV string into a list of dicts",
+    "implementation": "def parse_csv(text: str) -> list:\n    ...",
+    "test_suite": "def test_parse_csv():\n    ...",
+    "tags": ["csv", "parsing"],
+    "version": 1
+  }
+]
+```
+
+### Tags
+
+Tags are free-form strings attached at publish time. Use them to organize skills by domain, data format, or integration:
+
+```python
+registry.publish(skill, tags=["json", "api", "pagination"])
+registry.publish(skill, tags=["csv", "data-engineering"])
+registry.publish(skill, tags=["sre", "log-parsing", "acmecorp"])
+```
+
+### Security
+
+Skills in the registry are executable Python code. Before using a pulled skill in production:
+
+1. **Always validate with the sandbox** — pass `validate=True` and a `sandbox` instance.
+2. **Review the implementation** — use `arise inspect <id>` after adding to your library.
+3. **Pin versions** — pull a specific `version=` rather than always pulling latest.
+4. **Restrict IAM** — only your worker should have `s3:PutObject` on the registry bucket.
+
+See [Safety & Validation](/guide/safety/) for full security recommendations.
+
+---
+
+## Dashboard
+
+ARISE includes two dashboard modes for monitoring your skill library and trajectory history: a terminal TUI (requires no browser) and a web UI.
+
+### Terminal TUI
+
+```bash
+arise dashboard ./arise_skills
+arise dashboard ./arise_skills --trajectories-path ./arise_trajectories
+```
+
+Requires `arise-ai[dashboard]` (installs `rich`).
+
+The TUI displays:
+
+**Skill Library panel (left)**
+- Library version number
+- Active / Testing / Deprecated skill counts
+- Table of active skills: name, success rate, invocation count, origin (manual/synthesized/refined/patched), skill ID
+- Top performers highlighted
+
+**Trajectory History panel (right)**
+- Rolling list of recent episodes: task (truncated), reward score, step count, timestamp
+- Success/failure color-coded by reward threshold (>=0.5 = success)
+- Recent success rate across last 50 episodes
+
+**Evolution History panel (bottom)**
+- One row per evolution cycle: timestamp, gaps detected, tools synthesized, tools promoted, rejected tools, duration
+- Tools promoted shown in green; rejected tools with rejection reason
+
+The TUI refreshes every few seconds. Press `q` or `Ctrl-C` to quit.
+
+### Web UI
+
+```bash
+arise dashboard ./arise_skills --web
+arise dashboard ./arise_skills --web --port 9000
+arise dashboard ./arise_skills --web --trajectories-path ./arise_trajectories
+```
+
+Requires `arise-ai[dashboard]` (installs `rich` + `fastapi`). Opens a browser tab at `http://localhost:8501` (or the port you specify).
+
+The web UI provides the same information as the TUI but in a browser, with:
+
+**Overview tab**
+- Library stats card: version, active/testing/deprecated counts, average success rate
+- Skills table: sortable by success rate, invocations, or name; click a row to expand the implementation and test suite
+
+**Trajectories tab**
+- Paginated list of recent trajectories
+- Filter by reward threshold (successes only, failures only, or all)
+- Click a trajectory to expand and see each step: tool called, inputs, output or error, latency
+
+**Evolution tab**
+- Timeline of evolution cycles
+- For each cycle: which gaps were detected, which tools were synthesized vs. rejected, total duration and cost
+
+### Programmatic Access
+
+The same data is available from Python without the dashboard:
+
+```python
+# Library stats
+print(arise.stats)
+# {
+#   "active": 4,
+#   "testing": 1,
+#   "deprecated": 2,
+#   "total_skills": 7,
+#   "library_version": 8,
+#   "avg_success_rate": 0.847,
+#   "recent_success_rate": 0.9,
+#   "top_performers": [...],
+#   "episodes_run": 42,
+# }
+
+# Last evolution report
+report = arise.last_evolution
+print(report.tools_promoted)   # ["compute_sha256"]
+print(report.tools_rejected)   # [{"name": "fetch_api", "reason": "sandbox failure"}]
+print(report.duration_ms)      # 45000
+
+# Full history
+for r in arise.evolution_history:
+    print(r.timestamp, r.tools_promoted)
+
+# Active skills
+for skill in arise.skills:
+    print(skill.name, skill.success_rate, skill.invocation_count)
+```
+
+Tip: CLI alternatives
+
+For quick checks without starting the full dashboard:
+
+```bash
+arise status ./arise_skills       # library summary
+arise skills ./arise_skills       # active skills table
+arise inspect ./arise_skills <id> # full skill detail
+```
+
+---
+
+## Framework Adapters
+
+ARISE works with any callable that takes `(task: str, tools: list) -> str`. Built-in adapters convert `ToolSpec` objects into the native tool format for Strands, LangGraph, and CrewAI.
+
+---
+
+### Custom `agent_fn` (any framework)
+
+The simplest integration — wrap any LLM call in a function:
+
+```python
+from arise import ARISE
+from arise.rewards import task_success
+
+def agent_fn(task: str, tools: list) -> str:
+    # tools is a list of ToolSpec objects:
+    # - tool.name: str
+    # - tool.description: str
+    # - tool.fn: callable
+    # - tool.parameters: JSON schema dict
+
+    tool_map = {t.name: t.fn for t in tools}
+    tool_descriptions = "\n".join(f"- {t.name}: {t.description}" for t in tools)
+
+    # Call your LLM here (OpenAI, Anthropic, etc.)
+    response = your_llm_call(
+        system="You are a helpful assistant.",
+        user=f"Tools available:\n{tool_descriptions}\n\nTask: {task}",
+    )
+
+    # Execute any tool calls from the response, return the final answer
+    return response
+
+arise = ARISE(agent_fn=agent_fn, reward_fn=task_success)
+```
+
+The `ToolSpec.fn` is a plain Python callable — call it directly with keyword arguments matching the function signature.
+
+---
+
+### Strands Agents
+
+ARISE auto-detects a Strands `Agent` instance when passed via the `agent=` parameter. You can also use `strands_adapter()` directly for more control.
+
+```bash
+pip install strands-agents
+```
+
+**Auto-detect (recommended):**
+
+```python
+from arise import ARISE
+from arise.rewards import task_success
+from strands import Agent
+from strands.models import BedrockModel
+
+model = BedrockModel(model_id="us.anthropic.claude-sonnet-4-20250514")
+agent = Agent(model=model, system_prompt="You are an SRE assistant.")
+
+# Pass agent= and ARISE wraps it automatically
+arise = ARISE(
+    agent=agent,
+    reward_fn=task_success,
+    model="gpt-4o-mini",
+)
+
+arise.run("Check the error rate for service payment-api")
+```
+
+**Using `strands_adapter()` directly:**
+
+```python
+from arise import ARISE
+from arise.adapters.strands import strands_adapter
+from arise.rewards import task_success
+from strands.models import BedrockModel
+
+# From an existing agent
+agent_fn = strands_adapter(existing_agent)
+
+# Or create agents on the fly per episode
+agent_fn = strands_adapter(
+    model=BedrockModel(model_id="us.anthropic.claude-sonnet-4-20250514"),
+    system_prompt="You are an SRE assistant.",
+)
+
+arise = ARISE(agent_fn=agent_fn, reward_fn=task_success)
+```
+
+ARISE tools are injected alongside any `@tool`-decorated functions the agent already has. The adapter converts `ToolSpec` objects into Strands-compatible callables with proper type annotations and docstrings.
+
+---
+
+### LangGraph
+
+ARISE auto-detects a compiled LangGraph graph (any object with a `get_graph` method).
+
+```bash
+pip install langgraph langchain-core langchain-openai
+```
+
+**Auto-detect (recommended):**
+
+```python
+from arise import ARISE
+from arise.rewards import task_success
+from langgraph.prebuilt import create_react_agent
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(model="gpt-4o")
+graph = create_react_agent(llm, tools=[])
+
+# Pass graph via agent= — auto-detected by get_graph attribute
+arise = ARISE(
+    agent=graph,
+    reward_fn=task_success,
+    model="gpt-4o-mini",
+)
+
+arise.run("Summarize the logs from the last hour")
+```
+
+**Using `langgraph_adapter()` directly:**
+
+```python
+from arise import ARISE
+from arise.adapters.langgraph import langgraph_adapter
+from arise.rewards import task_success
+from langgraph.prebuilt import create_react_agent
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(model="gpt-4o")
+graph = create_react_agent(llm, tools=[])
+
+agent_fn = langgraph_adapter(graph)
+# Or create a new react agent per episode:
+agent_fn = langgraph_adapter(
+    model=ChatOpenAI(model="gpt-4o"),
+    system_prompt="You are a helpful assistant.",
+)
+
+arise = ARISE(agent_fn=agent_fn, reward_fn=task_success)
+```
+
+ARISE tools are converted to `langchain_core.tools.tool`-decorated callables and merged with any tools the graph already has. Because LangGraph compiled graphs are immutable, the adapter creates a new `create_react_agent` instance per episode with the merged tool list.
+
+---
+
+### CrewAI
+
+CrewAI crews are not auto-detected. Use `crewai_adapter()` explicitly.
+
+```bash
+pip install crewai
+```
+
+```python
+from arise import ARISE
+from arise.adapters.crewai import crewai_adapter
+from arise.rewards import task_success
+from crewai import Agent, Task, Crew
+
+# Define your crew with a {task} placeholder in task description
+analyst = Agent(
+    role="Data Analyst",
+    goal="Analyze data and answer questions",
+    backstory="Expert data analyst with Python skills.",
+)
+task = Task(
+    description="{task}",   # ARISE fills this in on each run
+    agent=analyst,
+    expected_output="A clear answer to the task.",
+)
+crew = Crew(agents=[analyst], tasks=[task])
+
+agent_fn = crewai_adapter(crew)
+
+arise = ARISE(agent_fn=agent_fn, reward_fn=task_success)
+arise.run("Calculate the average response time from these logs: ...")
+```
+
+ARISE tools are injected into all crew agents before each `kickoff()` and removed afterward to prevent accumulation across calls.
+
+---
+
+### Raw OpenAI / Anthropic
+
+Wrap the API call directly in an `agent_fn`. See the [quickstart](/getting-started/quickstart/) for a full example. For tool-calling APIs (function calling), convert `ToolSpec` objects to the API's tool format:
+
+```python
+import openai
+
+def openai_agent_fn(task: str, tools: list) -> str:
+    client = openai.OpenAI()
+
+    # Convert ToolSpec to OpenAI function format
+    openai_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+            }
+        }
+        for t in tools
+    ]
+    tool_map = {t.name: t.fn for t in tools}
+
+    messages = [{"role": "user", "content": task}]
+
+    while True:
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            tools=openai_tools if openai_tools else None,
+        )
+        msg = response.choices[0].message
+
+        if not msg.tool_calls:
+            return msg.content or ""
+
+        # Execute tool calls
+        messages.append(msg)
+        for tc in msg.tool_calls:
+            import json
+            fn = tool_map[tc.function.name]
+            args = json.loads(tc.function.arguments)
+            result = fn(**args)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": str(result),
+            })
+```
+
+See [`examples/api_agent.py`](https://github.com/abekek/arise/blob/main/examples/api_agent.py) for a complete HTTP agent example.
+
+---
+
+### Writing a Custom Adapter
+
+Any function matching `(task: str, tools: list[ToolSpec]) -> str` is a valid `agent_fn`. The key contract:
+
+- Receive the task string and current tool list
+- Call tools via `tool.fn(*args, **kwargs)` — ARISE wraps these to record invocations
+- Return a string (the agent's final answer)
+- Let exceptions propagate — ARISE catches them and records them as failed steps
+
+```python
+def my_adapter(task: str, tools: list) -> str:
+    # Your framework integration here
+    result = your_framework.run(task=task, tools=tools)
+    return str(result)
+
+arise = ARISE(agent_fn=my_adapter, reward_fn=task_success)
+```
+
+---
+
+## CLI Reference
+
+The `arise` CLI manages your skill library, trajectories, and infrastructure. All commands take an optional path argument pointing to your skill library directory (default: `./arise_skills`).
+
+```bash
+arise --help
+```
+
+---
+
+### `arise status`
+
+Show statistics for a skill library.
+
+```bash
+arise status [path]
+arise status ./arise_skills
+```
+
+**Output:**
+
+```
+ARISE Skill Library — ./arise_skills
+  Version:      8
+  Active:       4
+  Testing:      1
+  Deprecated:   2
+  Total:        7
+  Avg Success:  84.7%
+
+  Top Performers:
+    compute_sha256: 100.0% (23 invocations)
+    parse_json_response: 91.3% (46 invocations)
+```
+
+---
+
+### `arise skills`
+
+List all active skills with performance metrics.
+
+```bash
+arise skills [path]
+arise skills ./arise_skills
+```
+
+**Output:**
+
+```
+Name                      Success    Invocations  Origin       ID
+---------------------------------------------------------------------------
+compute_sha256            100.0%     23           synthesized  a1b2c3d4
+parse_json_response       91.3%      46           synthesized  e5f6g7h8
+fetch_all_paginated       78.9%      19           synthesized  i9j0k1l2
+read_file                 100.0%     52           manual       m3n4o5p6
+```
+
+---
+
+### `arise inspect`
+
+View the full implementation and test suite for a specific skill.
+
+```bash
+arise inspect <path> <skill_id>
+arise inspect ./arise_skills a1b2c3d4
+```
+
+**Output:**
+
+```
+Name:        compute_sha256
+ID:          a1b2c3d4
+Status:      active
+Origin:      synthesized
+Version:     2
+Success:     100.0% (23 invocations)
+Description: Compute the SHA-256 hash of a file
+
+--- Implementation ---
+import hashlib
+
+def compute_sha256(path: str) -> str:
+    """Compute the SHA-256 hash of a file."""
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+--- Test Suite ---
+def test_compute_sha256():
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        f.write(b"hello")
+        name = f.name
+    result = compute_sha256(name)
+    assert len(result) == 64
+    os.unlink(name)
+```
+
+---
+
+### `arise rollback`
+
+Roll back the skill library to a previous version checkpoint.
+
+```bash
+arise rollback <path> <version>
+arise rollback ./arise_skills 3
+```
+
+Every skill promotion creates a new version. Rolling back restores the exact set of active skills from that checkpoint without deleting any data — you can roll forward again.
+
+---
+
+### `arise export`
+
+Export all active skills as individual `.py` files.
+
+```bash
+arise export <path> <output_dir>
+arise export ./arise_skills ./exported_skills
+```
+
+**Output:**
+
+```
+Exported: ./exported_skills/compute_sha256.py
+Exported: ./exported_skills/parse_json_response.py
+Exported: ./exported_skills/read_file.py
+
+3 skills exported.
+```
+
+Each file contains the skill implementation with metadata in a comment header.
+
+---
+
+### `arise evolve`
+
+Inspect or trigger evolution from the command line.
+
+```bash
+# Dry-run: detect gaps and show what would be synthesized (1 LLM call)
+arise evolve --dry-run
+
+# With custom paths
+arise evolve \
+  --skills-path ./arise_skills \
+  --trajectories-path ./arise_trajectories \
+  --dry-run
+```
+
+**Dry-run output:**
+
+```
+Should evolve: True
+Recent failures: 6
+
+[DRY RUN] Running gap detection (1 LLM call)...
+
+Detected 2 capability gaps:
+  - decode_base64_metrics: Decode proprietary base64-encoded metrics payload
+    Signature: def decode_base64_metrics(payload: str) -> dict:
+    Evidence: Agent said: I need to decode this base64 payload but I have no tool for it
+    Evidence: Error: 'str' object has no attribute 'decode'
+
+  - fetch_paginated_api: Fetch all pages from a paginated REST API
+    Signature: def fetch_paginated_api(url: str, auth_token: str) -> list:
+    Evidence: TOOL_MISSING: http client that handles auth headers
+
+Run without --dry-run to synthesize these tools.
+```
+
+---
+
+### `arise history`
+
+Show recent trajectory history.
+
+```bash
+arise history [path] [-n N]
+arise history ./arise_trajectories -n 20
+```
+
+**Output:**
+
+```
+Task                                               Reward   Steps   Time
+-------------------------------------------------------------------------------------
+Compute the SHA-256 hash of hello.txt              1.00     2       2026-03-21 10:15
+Fetch all users from /api/users with pagination    0.00     1       2026-03-21 10:14
+Parse the JSON response from the metrics API       0.00     1       2026-03-21 10:13
+```
+
+---
+
+### `arise dashboard`
+
+Launch the skill library dashboard.
+
+```bash
+# Terminal TUI (requires arise-ai[dashboard])
+arise dashboard [path]
+arise dashboard ./arise_skills
+arise dashboard ./arise_skills --trajectories-path ./arise_trajectories
+
+# Web UI on localhost:8501
+arise dashboard ./arise_skills --web
+arise dashboard ./arise_skills --web --port 9000
+```
+
+See [Dashboard](/guide/dashboard/) for details on what each view shows.
+
+---
+
+### `arise setup-distributed`
+
+Provision or tear down AWS infrastructure for distributed mode.
+
+```bash
+# Provision S3 bucket + SQS queue + DLQ, save config to .arise.json
+arise setup-distributed --region us-west-2
+
+# With explicit names (auto-generated by default)
+arise setup-distributed \
+  --region us-west-2 \
+  --bucket my-arise-skills \
+  --queue my-arise-trajectories \
+  --profile my-aws-profile
+
+# Destroy resources from .arise.json
+arise setup-distributed --destroy
+```
+
+Requires `arise-ai[aws]`.
+
+**Output:**
+
+```
+Created S3 bucket: arn:aws:s3:::arise-skills-a1b2c3d4e5f6
+Created SQS DLQ:   arn:aws:sqs:us-west-2:123456789:arise-trajectories-abc-dlq
+Created SQS queue: arn:aws:sqs:us-west-2:123456789:arise-trajectories-abc
+Config saved to .arise.json
+```
+
+---
+
+### `arise registry`
+
+Manage skill import/export and search.
+
+#### `arise registry export`
+
+Export active skills to a JSON file:
+
+```bash
+arise registry export <path> [-o output.json]
+arise registry export ./arise_skills -o skills.json
+```
+
+#### `arise registry import`
+
+Import skills from a JSON file (with sandbox validation):
+
+```bash
+arise registry import <input.json> <path>
+arise registry import skills.json ./arise_skills
+```
+
+Skills that fail sandbox validation are skipped with a warning.
+
+#### `arise registry search`
+
+Search skills in the local library by keyword:
+
+```bash
+arise registry search <query> [--tags tag1 tag2]
+arise registry search "csv parsing" --tags data json
+```
+
+**Output:**
+
+```
+Name                      Success    Invocations  ID
+------------------------------------------------------------
+parse_csv                 91.3%      46           a1b2c3d4
+read_csv_columns          87.5%      24           e5f6g7h8
+```
+
+Note: registry search vs SkillRegistry.search()
+
+`arise registry search` searches your local skill library by name. To search an S3-backed registry, use `SkillRegistry.search()` from Python — see [Skill Registry](/guide/registry/).
+
+---
+
+## API - ARISE
+
+The main entry point. Wraps your agent function and manages the skill library, trajectory recording, and evolution pipeline.
+
+```python
+from arise import ARISE
+```
+
+### Constructor
+
+```python
+ARISE(
+    agent_fn=None,           # (task: str, tools: list) -> str
+    reward_fn=task_success,  # (trajectory: Trajectory) -> float
+    model="gpt-4o-mini",     # LLM for synthesis (not your agent's model)
+    sandbox=None,            # custom Sandbox instance
+    skill_library=None,      # custom SkillLibrary (local mode)
+    config=None,             # ARISEConfig (overrides model if set)
+    agent=None,              # Strands Agent or LangGraph compiled graph
+    skill_store=None,        # remote SkillStore (distributed mode)
+    trajectory_reporter=None # remote TrajectoryReporter (distributed mode)
+)
+```
+
+Provide either `agent_fn` or `agent`, not both.
+
+When `agent` is provided, ARISE auto-detects the framework:
+- Strands `Agent` (has `tool_registry`) → wraps with `strands_adapter`
+- LangGraph compiled graph (has `get_graph`) → wraps with `langgraph_adapter`
+
+### Methods
+
+```python
+class ARISE:
+    def run(self, task: str, **kwargs) -> str: ...
+    def train(self, tasks: list[str], num_episodes: int = None) -> None: ...
+    def evolve(self) -> None: ...
+    def add_skill(self, fn: Callable, description: str = "") -> None: ...
+    def remove_skill(self, name: str) -> None: ...
+    def start_ab_test(self, skill_a: Skill, skill_b: Skill, min_episodes: int = 20) -> SkillABTest: ...
+    def export(self, path: str) -> None: ...
+    def rollback(self, version: int) -> None: ...
+```
+
+| Method | Description |
+|--------|-------------|
+| `run(task, **kwargs)` | Run a single task. Records the trajectory, computes the reward, and triggers evolution if thresholds are met. Kwargs land in `trajectory.metadata`. |
+| `train(tasks, num_episodes)` | Run multiple tasks in sequence, cycling through the list. Defaults to `len(tasks)` episodes. |
+| `evolve()` | Manually trigger one evolution cycle. Only works in local mode. |
+| `add_skill(fn, description)` | Add a hand-written Python function to the skill library. Promoted immediately. Not available in distributed mode. |
+| `remove_skill(name)` | Deprecate an active skill by name. Raises `ValueError` if not found. |
+| `start_ab_test(skill_a, skill_b, min_episodes)` | Start an A/B test between two skill versions. Called automatically by `evolve()` when patching. |
+| `export(path)` | Export all active skills as individual `.py` files. |
+| `rollback(version)` | Roll back the skill library to a previous version checkpoint. |
+
+#### Usage Examples
+
+```python
+# Single task
+result = arise.run("Compute the SHA-256 of /tmp/data.txt")
+
+# Pass signals to your reward function
+result = arise.run(task, success=True)
+result = arise.run(task, expected="Paris")
+result = arise.run(task, expected_output="42")
+```
+
+```python
+# Training loop
+tasks = [
+    "Fetch users from /api/users",
+    "Parse the metrics response",
+    "Compute the SHA-256 of /tmp/data.txt",
+]
+arise.train(tasks, num_episodes=30)
+```
+
+```python
+# Add a hand-written skill
+def compute_sha256(path: str) -> str:
+    """Compute SHA-256 hash of a file."""
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+arise.add_skill(compute_sha256, description="Compute SHA-256 hash of a file")
+```
+
+---
+
+### Properties
+
+```python
+class ARISE:
+    skills: list[Skill]
+    stats: dict
+    last_evolution: EvolutionReport | None
+    evolution_history: list[EvolutionReport]
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `skills` | `list[Skill]` | Currently active skills. |
+| `stats` | `dict` | Summary statistics: episode count, active/testing/deprecated counts, success rates, top performers. |
+| `last_evolution` | `EvolutionReport \| None` | Most recent evolution report, or `None` if no evolution has run. |
+| `evolution_history` | `list[EvolutionReport]` | All evolution reports from this session. |
+
+```python
+# Stats example
+print(arise.stats)
+# {
+#   "episodes_run": 42,
+#   "active": 4,
+#   "testing": 1,
+#   "deprecated": 2,
+#   "total_skills": 7,
+#   "library_version": 8,
+#   "avg_success_rate": 0.847,
+#   "recent_success_rate": 0.9,
+#   "top_performers": [
+#     {"name": "compute_sha256", "success_rate": 1.0, "invocations": 23},
+#   ]
+# }
+```
+
+```python
+# Evolution report
+report = arise.last_evolution
+if report:
+    print(report.tools_promoted)  # ["compute_sha256"]
+    print(report.tools_rejected)  # [{"name": "fetch_api", "reason": "sandbox failure"}]
+    print(report.duration_ms)     # 45000
+    print(report.gaps_detected)   # ["compute_sha256", "fetch_all_paginated"]
+```
+
+---
+
+### Factory Functions
+
+```python
+from arise import create_distributed_arise, ARISEConfig
+
+config = ARISEConfig(
+    s3_bucket="my-skills-bucket",
+    sqs_queue_url="https://sqs.us-west-2.amazonaws.com/.../arise-trajectories",
+    aws_region="us-west-2",
+)
+
+arise = create_distributed_arise(
+    agent_fn=my_agent,
+    reward_fn=task_success,
+    config=config,
+)
+```
+
+`create_distributed_arise()` is a convenience factory for distributed mode. Requires `config.s3_bucket` and `config.sqs_queue_url`.
+
+---
+
+## API - ARISEConfig
+
+All configuration for an ARISE instance. Pass to `ARISE(config=...)` or use individual fields as defaults.
+
+```python
+from arise import ARISEConfig
+
+config = ARISEConfig(
+    model="gpt-4o-mini",
+    sandbox_backend="subprocess",
+    failure_threshold=5,
+    max_evolutions_per_hour=3,
+    verbose=True,
+)
+
+arise = ARISE(agent_fn=my_agent, reward_fn=reward_fn, config=config)
+```
+
+### Fields
+
+#### Core
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model` | `str` | `"gpt-4o-mini"` | LLM model for tool synthesis (not your agent's model) |
+| `verbose` | `bool` | `True` | Print episode status and evolution progress |
+
+#### Sandbox
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sandbox_backend` | `str` | `"subprocess"` | `"subprocess"` or `"docker"` |
+| `sandbox_timeout` | `int` | `30` | Seconds before sandbox kills the process |
+
+#### Evolution Triggers
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `failure_threshold` | `int` | `5` | Consecutive failures before evolution triggers |
+| `plateau_window` | `int` | `10` | Episodes to look back for plateau detection |
+| `plateau_min_improvement` | `float` | `0.05` | Minimum success rate improvement to avoid plateau trigger |
+| `max_evolutions_per_hour` | `int` | `3` | Rate limit for evolution cycles (cost control) |
+| `max_refinement_attempts` | `int` | `3` | Max LLM retries to fix a failing skill |
+| `max_synthesis_workers` | `int` | `3` | Max concurrent tool synthesis threads |
+
+#### Library
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_library_size` | `int` | `50` | Max number of active skills before synthesis stops |
+| `skill_store_path` | `str` | `"./arise_skills"` | Local SQLite skill library path |
+| `trajectory_store_path` | `str` | `"./arise_trajectories"` | Local SQLite trajectory store path |
+| `max_trajectories` | `int` | `1000` | Max trajectories to retain (older ones are pruned) |
+
+#### Security
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `allowed_imports` | `list[str] \| None` | `None` | Whitelist of importable modules. `None` = no restriction. **Always set in production.** |
+
+#### Distributed Mode (S3 + SQS)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `s3_bucket` | `str \| None` | `None` | S3 bucket for distributed skill store |
+| `s3_prefix` | `str` | `"arise"` | S3 key prefix |
+| `sqs_queue_url` | `str \| None` | `None` | SQS queue URL for trajectory reporting |
+| `aws_region` | `str` | `"us-east-1"` | AWS region |
+| `skill_cache_ttl_seconds` | `int` | `30` | How often to refresh skills from S3 |
+
+#### Skill Registry
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `registry_bucket` | `str \| None` | `None` | S3 bucket for the skill registry |
+| `registry_prefix` | `str` | `"arise-registry"` | S3 key prefix for the registry |
+| `registry_check_before_synthesis` | `bool` | `True` | Check registry before calling the LLM to synthesize |
+
+#### Multi-Model Routing
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `model_routes` | `dict[str, str] \| None` | `None` | Route specific synthesis tasks to different models |
+| `auto_select_model` | `bool` | `False` | Auto-promote the model with the best synthesis track record |
+
+```python
+config = ARISEConfig(
+    model_routes={
+        "gap_detection": "gpt-4o-mini",    # cheap for analysis
+        "synthesis": "claude-sonnet-4-5-20250929",  # better code quality
+        "refinement": "gpt-4o-mini",
+    },
+    auto_select_model=True,
+)
+```
+
+#### Telemetry
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enable_telemetry` | `bool` | `False` | Enable OpenTelemetry spans for evolution steps (requires `arise-ai[otel]`) |
+
+### Examples
+
+**Development (minimal config):**
+
+```python
+config = ARISEConfig(
+    failure_threshold=2,    # evolve quickly
+    verbose=True,
+)
+```
+
+**Production (locked down):**
+
+```python
+config = ARISEConfig(
+    model="gpt-4o-mini",
+    sandbox_backend="docker",
+    sandbox_timeout=30,
+    failure_threshold=5,
+    max_evolutions_per_hour=3,
+    max_library_size=50,
+    allowed_imports=["json", "re", "hashlib", "csv", "math", "base64", "datetime"],
+    verbose=False,
+)
+```
+
+**Distributed with registry:**
+
+```python
+config = ARISEConfig(
+    s3_bucket="arise-skills-prod",
+    sqs_queue_url="https://sqs.us-west-2.amazonaws.com/.../arise-trajectories",
+    aws_region="us-west-2",
+    registry_bucket="arise-registry-prod",
+    registry_check_before_synthesis=True,
+    model="gpt-4o-mini",
+    allowed_imports=["json", "re", "hashlib"],
+)
+```
+
+---
+
+## API - Types
+
+Core data types used throughout ARISE.
+
+```python
+from arise.types import (
+    Skill, SkillStatus, SkillOrigin,
+    ToolSpec,
+    Trajectory, Step,
+    GapAnalysis,
+    EvolutionReport,
+    SandboxResult, TestResult,
+    SkillValidationError,
+)
+```
+
+---
+
+### `Skill`
+
+A Python tool in the skill library.
+
+```python
+@dataclass
+class Skill:
+    id: str                      # 8-char UUID prefix (auto-generated)
+    name: str                    # function name (must match [a-z_][a-z0-9_]*)
+    description: str             # human-readable description
+    implementation: str          # Python source code
+    test_suite: str              # test source code (run in sandbox)
+    version: int                 # incremented on each patch/refinement
+    status: SkillStatus          # TESTING, ACTIVE, or DEPRECATED
+    origin: SkillOrigin          # MANUAL, SYNTHESIZED, REFINED, COMPOSED, or PATCHED
+    parent_id: str | None        # ID of the skill this was derived from (patches)
+    created_at: datetime
+
+    # Performance tracking (updated by ARISE on each invocation)
+    invocation_count: int
+    success_count: int
+    avg_latency_ms: float
+    error_log: list[str]
+
+    # Computed property
+    success_rate: float          # success_count / invocation_count
+```
+
+**Methods:**
+
+```python
+skill.to_callable() -> Callable    # exec implementation, return the function
+skill.to_tool_spec() -> ToolSpec   # convert to ToolSpec for agent use
+```
+
+Skill names must match `[a-z_][a-z0-9_]*` — lowercase, underscores, no spaces.
+
+---
+
+### `SkillStatus`
+
+```python
+class SkillStatus(Enum):
+    TESTING    = "testing"     # synthesized but not yet promoted
+    ACTIVE     = "active"      # promoted, available to agents
+    DEPRECATED = "deprecated"  # removed (rollback, lost A/B test, manually removed)
+```
+
+---
+
+### `SkillOrigin`
+
+```python
+class SkillOrigin(Enum):
+    MANUAL     = "manual"      # added via arise.add_skill()
+    SYNTHESIZED = "synthesized" # generated by LLM from scratch
+    REFINED    = "refined"     # regenerated after failing adversarial tests
+    COMPOSED   = "composed"    # composed from multiple existing skills
+    PATCHED    = "patched"     # incremental fix applied to existing skill
+```
+
+---
+
+### `ToolSpec`
+
+The representation of a skill as seen by the agent. ARISE builds this from a `Skill` and passes it to `agent_fn`.
+
+```python
+@dataclass
+class ToolSpec:
+    name: str
+    description: str
+    parameters: dict[str, Any]   # JSON Schema for the function parameters
+    fn: Callable                 # the actual callable (wraps Skill.to_callable())
+    skill_id: str | None         # back-reference to the Skill (None for seed tools)
+```
+
+`ToolSpec` is callable — `tool_spec(arg1, arg2)` delegates to `tool_spec.fn(arg1, arg2)`.
+
+The `parameters` schema follows JSON Schema format:
+
+```python
+{
+    "type": "object",
+    "properties": {
+        "path": {"type": "string"},
+        "encoding": {"type": "string", "default": "utf-8"},
+    },
+    "required": ["path"],
+}
+```
+
+---
+
+### `Trajectory`
+
+A complete record of one agent episode.
+
+```python
+@dataclass
+class Trajectory:
+    task: str                      # task string passed to arise.run()
+    steps: list[Step]              # every tool call the agent made
+    outcome: str                   # agent's final response (truncated to 1000 chars)
+    reward: float                  # score assigned by reward_fn (set after evaluation)
+    skill_library_version: int     # library version at start of episode
+    timestamp: datetime
+    metadata: dict[str, Any]       # kwargs passed to arise.run(task, **kwargs)
+```
+
+---
+
+### `Step`
+
+One tool invocation within a trajectory.
+
+```python
+@dataclass
+class Step:
+    observation: str             # description of what happened
+    reasoning: str               # agent's stated reasoning (if available)
+    action: str                  # tool name that was called
+    action_input: dict[str, Any] # keyword arguments passed to the tool
+    result: str                  # tool return value (truncated to 500 chars)
+    error: str | None            # exception message if the tool raised
+    latency_ms: float            # wall-clock time for the tool call
+```
+
+`step.error` is `None` on success. In reward functions, check `any(s.error for s in trajectory.steps)` to detect tool failures.
+
+---
+
+### `GapAnalysis`
+
+A detected capability gap — the output of `SkillForge.detect_gaps()`.
+
+```python
+@dataclass
+class GapAnalysis:
+    description: str             # what capability is missing
+    evidence: list[str]          # quotes from failure trajectories
+    suggested_name: str          # proposed function name
+    suggested_signature: str     # proposed function signature
+    similar_existing: list[str]  # names of existing skills that partially cover this gap
+```
+
+---
+
+### `EvolutionReport`
+
+Summary of one evolution cycle.
+
+```python
+@dataclass
+class EvolutionReport:
+    timestamp: datetime
+    gaps_detected: list[str]              # suggested names of detected gaps
+    tools_synthesized: list[str]          # names of tools attempted
+    tools_promoted: list[str]             # names of tools that passed and went ACTIVE
+    tools_rejected: list[dict[str, str]]  # [{"name": "...", "reason": "..."}]
+    duration_ms: float                    # total time for the evolution cycle
+    cost_usd: float                       # estimated LLM cost (if tracked)
+```
+
+Access via:
+
+```python
+report = arise.last_evolution
+for report in arise.evolution_history:
+    ...
+```
+
+---
+
+### `SandboxResult`
+
+Output of running a skill's test suite in the sandbox.
+
+```python
+@dataclass
+class SandboxResult:
+    success: bool                  # True if all tests passed
+    test_results: list[TestResult]
+    total_passed: int
+    total_failed: int
+    stdout: str
+    stderr: str
+```
+
+---
+
+### `TestResult`
+
+Result of a single test case.
+
+```python
+@dataclass
+class TestResult:
+    passed: bool
+    test_name: str
+    error: str | None
+    stdout: str
+    execution_time_ms: float
+```
+
+---
+
+### `SkillValidationError`
+
+Raised by `SkillRegistry.pull()` when `validate=True` and the pulled skill fails sandbox testing.
+
+```python
+from arise.types import SkillValidationError
+
+try:
+    skill = registry.pull("parse_csv", validate=True, sandbox=sandbox)
+except SkillValidationError as e:
+    print(f"Skill failed validation: {e}")
+```
+
+---
+
+## Benchmarks
+
+ARISE was evaluated on two proprietary-format domains where LLMs cannot rely on training data — they must synthesize tools to make progress.
+
+Full results, figures, and the research paper are in [`benchmarks/`](https://github.com/abekek/arise/tree/main/benchmarks) and [`paper/`](https://github.com/abekek/arise/tree/main/paper).
+
+---
+
+### AcmeCorp — SRE Agent Onboarding
+
+**Domain:** Site Reliability Engineering tasks at a fictional company with proprietary log formats, a base64-encoded metrics API, and internal configuration files.
+
+**Setup:** 60 episodes across 4 phases (15 each), seed = 42. Synthesis model: gpt-4o-mini for all ARISE runs.
+
+**Phases:**
+1. Log analysis (count errors, extract services, aggregate by time)
+2. Metrics API (make HTTP calls, decode proprietary base64 format)
+3. Configuration (read and reason over internal config files)
+4. Incident response (multi-domain composition across logs + metrics + config)
+
+#### Results
+
+| Model | Condition | Phase 1 (Logs) | Phase 2 (Metrics) | Phase 3 (Config) | Phase 4 (Incidents) | **Overall** | Tools |
+|-------|-----------|:--------------:|:-----------------:|:----------------:|:-------------------:|:-----------:|:-----:|
+| **Claude Sonnet** | **ARISE** | 60% | 73% | **100%** | **80%** | **78%** | 2 |
+| GPT-4o-mini | ARISE | 20% | 67% | 93% | 47% | 57% | 21 |
+| GPT-4o-mini | No tools | 33% | 7% | 93% | 60% | 48% | 0 |
+| GPT-4o-mini | Fixed tools | 13% | 53% | 87% | 40% | 48% | 7 |
+
+#### Key Findings
+
+**ARISE improves both models.** GPT-4o-mini improved from 48% to 57% (+9pp). Claude Sonnet with ARISE achieved 78%.
+
+**Agent reasoning quality matters more than tool quantity.** Claude reached 78% with just 2 tools. GPT-4o-mini needed 21 tools to reach 57%. A strong model that uses tools well outperforms a weak model with many tools.
+
+**Self-evolved tools beat hand-written tools.** GPT-4o-mini with ARISE (57%) outperformed GPT-4o-mini with 7 carefully hand-written fixed tools (48%). Self-evolved tools are better because the synthesis prompt includes the agent's actual failure patterns — they're shaped to match how the agent thinks.
+
+**Phase 2 proves the core thesis.** The metrics API requires decoding a proprietary base64 format — impossible without tools. ARISE-evolved tools achieved 67–73% on this phase. Without tools: 7%.
+
+**Phase 4 shows where model quality dominates.** Incident response requires composing tools across multiple domains. Claude composed effectively (80%). GPT-4o-mini actually scored lower with tools (47%) than without (60%) — tool-calling overhead hurt more than tool access helped.
+
+---
+
+### DataCorp — Data Engineering
+
+**Domain:** Data engineering tasks with proprietary data formats, transformation pipelines, and custom validation schemas.
+
+| Model | Condition | **Overall** |
+|-------|-----------|:-----------:|
+| GPT-4o-mini | **ARISE** | **92%** |
+| GPT-4o-mini | No tools | 50% |
+
+ARISE improved GPT-4o-mini by **+42 percentage points** on DataCorp tasks. The domain is heavily tool-dependent — with the right tools, even a smaller model performs well.
+
+---
+
+### Cost Analysis
+
+| Run | Agent calls | Synthesis calls | Estimated cost |
+|-----|------------|----------------|:--------------:|
+| GPT-4o-mini + ARISE | 60 | ~64 | ~$0.44 |
+| GPT-4o-mini + No tools | 60 | 0 | ~$0.18 |
+| GPT-4o-mini + Fixed tools | 60 | 0 | ~$0.18 |
+| Claude Sonnet + ARISE | 60 | ~5 | ~$5.50 |
+
+Each evolution cycle costs ~$0.01–0.05 with gpt-4o-mini. Claude synthesized fewer tools (only 1 evolution cycle triggered) because its stronger reasoning handled more tasks directly.
+
+---
+
+### Running the Benchmarks
+
+```bash
+cd benchmarks
+pip install -r requirements.txt
+
+# AcmeCorp benchmark
+python run_benchmark.py --domain acmecorp --model gpt-4o-mini --seed 42
+
+# With ARISE disabled (no-evolution baseline)
+python run_benchmark.py --domain acmecorp --model gpt-4o-mini --no-evolution
+
+# DataCorp benchmark
+python run_benchmark.py --domain datacorp --model gpt-4o-mini --seed 42
+```
+
+Results are saved to `benchmarks/results/`. Figures are generated with `python benchmarks/plot_results.py`.
+
+See [`benchmarks/README.md`](https://github.com/abekek/arise/blob/main/benchmarks/README.md) for full documentation of the benchmark tasks, evaluation methodology, and how to add new domains.
+
+Note: Proprietary formats
+
+The AcmeCorp and DataCorp benchmarks use invented proprietary formats (log schemas, API response encodings, config syntax) that do not appear in any LLM training data. This isolates the tool-synthesis benefit from memorized knowledge.
