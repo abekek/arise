@@ -77,7 +77,8 @@ class ARISE:
         self.agent_fn = agent_fn
         self.reward_fn = reward_fn
         self.config = config or ARISEConfig(model=model)
-        self.config.model = model
+        if config is None:
+            self.config.model = model
 
         self.sandbox = sandbox or Sandbox(
             backend=self.config.sandbox_backend,

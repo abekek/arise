@@ -119,7 +119,7 @@ def llm_call_structured(
     messages: list[dict],
     model: str = "gpt-4o-mini",
     temperature: float = 0.0,
-    max_tokens: int = 4096,
+    max_tokens: int = 8192,
     max_retries: int = 3,
 ) -> dict:
     text = llm_call(messages, model, temperature, max_tokens, max_retries)
@@ -128,10 +128,24 @@ def llm_call_structured(
         lines = text.split("\n")
         lines = [l for l in lines[1:] if not l.strip() == "```"]
         text = "\n".join(lines)
+    # Try to extract JSON object or array from the text
+    if not text.startswith(("{", "[")):
+        start = text.find("{")
+        arr_start = text.find("[")
+        if arr_start != -1 and (start == -1 or arr_start < start):
+            start = arr_start
+        if start != -1:
+            text = text[start:]
     try:
         return json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"LLM returned invalid JSON: {text[:200]}") from e
+    except json.JSONDecodeError:
+        # Try to parse just the first JSON object or array
+        decoder = json.JSONDecoder()
+        try:
+            result, _ = decoder.raw_decode(text)
+            return result
+        except json.JSONDecodeError as e:
+            raise ValueError(f"LLM returned invalid JSON: {text[:200]}") from e
 
 
 def _raw_openai_call(

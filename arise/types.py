@@ -99,6 +99,13 @@ def _extract_parameters(fn: Callable) -> dict[str, Any]:
         list: "array", dict: "object",
     }
 
+    # Also map string type names for exec'd functions where annotations are strings
+    str_type_map = {
+        "str": "string", "int": "integer", "float": "number", "bool": "boolean",
+        "list": "array", "dict": "object",
+        "list[dict]": "array", "list[str]": "array", "list[int]": "array",
+    }
+
     properties: dict[str, Any] = {}
     required: list[str] = []
     for name, param in sig.parameters.items():
@@ -106,6 +113,16 @@ def _extract_parameters(fn: Callable) -> dict[str, Any]:
         hint = hints.get(name)
         if hint in type_map:
             prop["type"] = type_map[hint]
+        elif isinstance(hint, str) and hint in str_type_map:
+            prop["type"] = str_type_map[hint]
+        elif param.annotation is not inspect.Parameter.empty:
+            ann = param.annotation
+            if ann in type_map:
+                prop["type"] = type_map[ann]
+            elif isinstance(ann, str) and ann in str_type_map:
+                prop["type"] = str_type_map[ann]
+            else:
+                prop["type"] = "string"
         else:
             prop["type"] = "string"
         if param.default is inspect.Parameter.empty:
