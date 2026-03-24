@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .registry import AgentRegistry
-from .routes import agents, skills, trajectories, evolutions
+from .routes import agents, skills, trajectories, evolutions, settings
+from . import ws
 
 
 def create_console_app(data_dir: str = "~/.arise/console") -> FastAPI:
@@ -20,10 +21,22 @@ def create_console_app(data_dir: str = "~/.arise/console") -> FastAPI:
     skills.init(registry)
     trajectories.init(registry)
     evolutions.init(registry)
+    settings.init(data_dir)
+    ws.init(registry)
 
     app.include_router(agents.router)
     app.include_router(skills.router)
     app.include_router(trajectories.router)
     app.include_router(evolutions.router)
+    app.include_router(settings.router)
+    app.include_router(ws.router)
 
     return app
+
+
+def run_console(data_dir: str = "~/.arise/console", port: int = 8080, host: str = "0.0.0.0"):
+    """Run the ARISE Console server."""
+    import uvicorn
+    app = create_console_app(data_dir=data_dir)
+    print(f"\n  ARISE Console running at http://localhost:{port}\n")
+    uvicorn.run(app, host=host, port=port)
